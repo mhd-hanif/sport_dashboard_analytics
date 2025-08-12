@@ -4,7 +4,7 @@
     font-family: Inter, Segoe UI, Arial, sans-serif;
   }
   .sb-container {
-    max-width: 1400px;          /* centers and constrains width */
+    max-width: 1700px;          /* centers and constrains width */
     margin: 0 auto;
     padding: 0 18px 24px;        /* side padding + bottom breathing room */
   }
@@ -21,7 +21,7 @@
     display: flex;
     align-items: center;         /* centers icon vs. the two text lines */
     gap: 14px;
-    max-width: 1400px;           /* align header content with main container */
+    max-width: 1700px;           /* align header content with main container */
     margin: 0 auto;
     padding: 16px 18px;
   }
