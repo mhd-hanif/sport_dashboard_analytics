@@ -36,7 +36,7 @@ ICON_IMAGE = "sunbears_icon.webp"     # header icon under ./assets/
 # Rink bounds (match your data)
 RINK_BOUNDS: Dict[str, float] = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_max": 30.0}
 
-# Small shared styles that don't need media queries
+# Small shared styles (no media queries here)
 STYLES: Dict[str, Any] = {
     "page": {"background": "#f6f7fb", "fontFamily": "Inter, Segoe UI, Arial, sans-serif"},
     "card": {"background": "#ffffff", "borderRadius": "14px", "boxShadow": "0 8px 20px rgba(0,0,0,0.06)", "padding": "10px"},
@@ -273,7 +273,6 @@ def build_top_row(bounds: Dict[str, float]) -> html.Div:
     Top row with tracking graph and (optional) video.
     Both sides sit inside identical aspect-ratio boxes so they resize proportionally together.
     """
-    # shared aspect ratio (height/width) taken from rink bounds
     ar_padding = _aspect_padding_from_bounds(bounds)
 
     video_path = Path("assets") / VIDEO_FILENAME
@@ -283,28 +282,26 @@ def build_top_row(bounds: Dict[str, float]) -> html.Div:
         else html.Div(f"Place a video at ./assets/{VIDEO_FILENAME}", className="sb-placeholder")
     )
 
-    return html.Div(
+    # Left: tracking graph
+    left = html.Div(
         [
             html.Div(
-                [
-                    html.Div(
-                        [dcc.Graph(id="tracking-graph", className="sb-graph", config={"responsive": True})],
-                        className="sb-media__content",
-                    )
-                ],
-                className="sb-media",
-                style={"--ar": ar_padding},  # same aspect for both sides
-            ),
-            html.Div(
-                [
-                    html.Div([right_panel_child], className="sb-media__content")
-                ],
-                className="sb-media",
-                style={"--ar": ar_padding},  # same aspect for both sides
-            ),
+                [dcc.Graph(id="tracking-graph", className="sb-graph", config={"responsive": True})],
+                className="sb-media__content",
+            )
         ],
-        className="sb-grid-2col",
+        className="sb-media sb-media--graph",
+        style={"--ar": ar_padding},
     )
+
+    # Right: video
+    right = html.Div(
+        [html.Div([right_panel_child], className="sb-media__content")],
+        className="sb-media sb-media--video",
+        style={"--ar": ar_padding},
+    )
+
+    return html.Div([left, right], className="sb-grid-2col")
 
 
 def build_bottom_panel(timestamps: list[int]) -> html.Div:

@@ -1,12 +1,13 @@
-/* ---------- Page & container ---------- */
+/* ---------- Page & centered container ---------- */
 .sb-page {
     background: #f6f7fb;
     font-family: Inter, Segoe UI, Arial, sans-serif;
   }
   .sb-container {
-    max-width: 1700px;          /* centers and constrains width */
+    max-width: 1700px;     /* adjust this up/down to feel larger/smaller on wide screens */
+    width: 96%;
     margin: 0 auto;
-    padding: 0 18px 24px;        /* side padding + bottom breathing room */
+    padding: 0 0 24px;      /* bottom breathing room; header handles its own padding */
   }
   
   /* ---------- Header ---------- */
@@ -19,14 +20,15 @@
   }
   .sb-header__row {
     display: flex;
-    align-items: center;         /* centers icon vs. the two text lines */
+    align-items: center;     /* centers icon vs. the two text lines */
     gap: 14px;
-    max-width: 1700px;           /* align header content with main container */
+    max-width: 1700px;       /* keep header aligned with container */
+    width: 96%;
     margin: 0 auto;
-    padding: 16px 18px;
+    padding: 16px 0;
   }
   .sb-header__icon {
-    width: 88px;                 /* bigger icon */
+    width: 88px;             /* bigger icon */
     height: 88px;
     border-radius: 12px;
     object-fit: contain;
@@ -35,7 +37,7 @@
   .sb-header__texts {
     display: flex;
     flex-direction: column;
-    justify-content: center;     /* center the two lines as a block vs. the icon */
+    justify-content: center; /* center the two lines as a block vs. the icon */
     min-width: 0;
   }
   .sb-header__title {
@@ -50,7 +52,7 @@
     font-size: 14px;
   }
   
-  /* ---------- Cards ---------- */
+  /* ---------- Cards (bottom panels) ---------- */
   .sb-card {
     background: #ffffff;
     border-radius: 14px;
@@ -69,16 +71,20 @@
     margin: 18px 0;
   }
   
-  /* ---------- Proportional media boxes ---------- */
-  /* Both graph and video live in identical aspect-ratio boxes so they scale together */
+  /* ---------- Proportional media boxes (card look for BOTH graph & video) ---------- */
   .sb-media {
     position: relative;
     width: 100%;
+    border-radius: 12px;                         /* rounded corners */
+    background: #ffffff;                         /* card background */
+    box-shadow: 0 8px 20px rgba(0,0,0,0.06);     /* soft shadow */
+    border: 1px solid #e5e7eb;                   /* subtle border */
+    overflow: hidden;                             /* clip Plotly canvas to radius */
   }
   .sb-media::before {
     content: "";
     display: block;
-    padding-top: var(--ar, 56.25%); /* default 16:9 if --ar not provided */
+    padding-top: var(--ar, 56.25%);              /* aspect ratio shim; default 16:9 */
   }
   .sb-media__content {
     position: absolute;
@@ -87,12 +93,14 @@
     align-items: stretch;
     justify-content: stretch;
   }
+  
+  /* Inner elements fill the rounded card */
   .sb-graph,
   .sb-video,
   .sb-placeholder {
     width: 100%;
     height: 100%;
-    border-radius: 10px;
+    border-radius: 0;      /* parent handles rounding */
   }
   .sb-video { background: #000; }
   .sb-placeholder {
@@ -104,10 +112,8 @@
     border: 1px dashed #e5e7eb;
   }
   
-  /* ---------- Bottom panel ---------- */
-  .sb-bottom {
-    margin-top: 4px;
-  }
+  /* ---------- Bottom wrapper ---------- */
+  .sb-bottom { margin-top: 4px; }
   
   /* ---------------------- Responsive ---------------------- */
   @media (max-width: 1100px) {
