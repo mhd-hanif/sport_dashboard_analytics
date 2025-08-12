@@ -1,25 +1,32 @@
-/* Page */
+/* ---------- Page & container ---------- */
 .sb-page {
     background: #f6f7fb;
     font-family: Inter, Segoe UI, Arial, sans-serif;
   }
+  .sb-container {
+    max-width: 1400px;          /* centers and constrains width */
+    margin: 0 auto;
+    padding: 0 18px 24px;        /* side padding + bottom breathing room */
+  }
   
-  /* Header */
+  /* ---------- Header ---------- */
   .sb-header {
     position: sticky;
     top: 0;
     z-index: 5;
     background: #ffffff;
-    padding: 16px 18px;
     border-bottom: 1px solid #eee;
   }
   .sb-header__row {
     display: flex;
-    align-items: center;        /* centers icon vs. the two text lines */
+    align-items: center;         /* centers icon vs. the two text lines */
     gap: 14px;
+    max-width: 1400px;           /* align header content with main container */
+    margin: 0 auto;
+    padding: 16px 18px;
   }
   .sb-header__icon {
-    width: 88px;                /* bigger icon */
+    width: 88px;                 /* bigger icon */
     height: 88px;
     border-radius: 12px;
     object-fit: contain;
@@ -28,7 +35,7 @@
   .sb-header__texts {
     display: flex;
     flex-direction: column;
-    justify-content: center;    /* centers the two lines as a block vs. the icon */
+    justify-content: center;     /* center the two lines as a block vs. the icon */
     min-width: 0;
   }
   .sb-header__title {
@@ -43,31 +50,63 @@
     font-size: 14px;
   }
   
-  /* Cards */
+  /* ---------- Cards ---------- */
   .sb-card {
     background: #ffffff;
     border-radius: 14px;
     box-shadow: 0 8px 20px rgba(0,0,0,0.06);
     padding: 10px;
   }
+  .sb-card--padded {
+    margin: 16px 0;
+  }
   
-  /* Grid (top row) */
+  /* ---------- Grid (top row) ---------- */
   .sb-grid-2col {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
-    padding: 18px;
+    margin: 18px 0;
   }
   
-  /* Media sizes */
-  .sb-graph,
-  .sb-video {
+  /* ---------- Proportional media boxes ---------- */
+  /* Both graph and video live in identical aspect-ratio boxes so they scale together */
+  .sb-media {
+    position: relative;
     width: 100%;
-    height: 520px;
   }
-  .sb-video {
-    background: #000;
+  .sb-media::before {
+    content: "";
+    display: block;
+    padding-top: var(--ar, 56.25%); /* default 16:9 if --ar not provided */
+  }
+  .sb-media__content {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+  }
+  .sb-graph,
+  .sb-video,
+  .sb-placeholder {
+    width: 100%;
+    height: 100%;
     border-radius: 10px;
+  }
+  .sb-video { background: #000; }
+  .sb-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6b7280;
+    background: #fafafa;
+    border: 1px dashed #e5e7eb;
+  }
+  
+  /* ---------- Bottom panel ---------- */
+  .sb-bottom {
+    margin-top: 4px;
   }
   
   /* ---------------------- Responsive ---------------------- */
@@ -78,13 +117,14 @@
   @media (max-width: 768px) {
     .sb-header__icon { width: 76px; height: 76px; }
     .sb-header__title { font-size: 24px; }
-    .sb-graph, .sb-video { height: 420px; }
+    /* Make media a bit taller on narrow screens for readability */
+    .sb-media::before { padding-top: calc(var(--ar, 56.25%) + 6%); }
   }
   
   @media (max-width: 480px) {
     .sb-header__icon { width: 64px; height: 64px; }
     .sb-header__title { font-size: 21px; }
     .sb-header__subtitle { font-size: 13px; }
-    .sb-graph, .sb-video { height: 340px; }
+    .sb-media::before { padding-top: calc(var(--ar, 56.25%) + 10%); }
   }
   

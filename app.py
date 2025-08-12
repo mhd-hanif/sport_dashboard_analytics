@@ -36,11 +36,11 @@ ICON_IMAGE = "sunbears_icon.webp"     # header icon under ./assets/
 # Rink bounds (match your data)
 RINK_BOUNDS: Dict[str, float] = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_max": 30.0}
 
-# Small shared styles that don't need to be responsive
+# Small shared styles that don't need media queries
 STYLES: Dict[str, Any] = {
     "page": {"background": "#f6f7fb", "fontFamily": "Inter, Segoe UI, Arial, sans-serif"},
     "card": {"background": "#ffffff", "borderRadius": "14px", "boxShadow": "0 8px 20px rgba(0,0,0,0.06)", "padding": "10px"},
-    "card_msg": {"height": "520px", "display": "flex", "alignItems": "center", "justifyContent": "center", "color": "#6b7280"},
+    "card_msg": {"display": "flex", "alignItems": "center", "justifyContent": "center", "color": "#6b7280"},
     "controls_row": {"display": "flex", "gap": "10px", "alignItems": "center"},
     "controls_button": {"padding": "8px 12px", "borderRadius": "10px"},
 }
@@ -209,6 +209,7 @@ def build_tracking_figure(
     )
 
     fig.update_layout(
+        autosize=True,  # allow Plotly to resize with container
         xaxis=dict(range=[bounds["x_min"], bounds["x_max"]], showgrid=False, zeroline=False, visible=False),
         yaxis=dict(
             range=[bounds["y_min"], bounds["y_max"]],
@@ -237,8 +238,16 @@ def make_trails(df: pd.DataFrame, current_ts: int, trail_len: int) -> pd.DataFra
 # UI Builders
 # --------------------------------------------------------------------------------------
 
+def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
+    """Return percentage string for padding-top that matches rink aspect (height/width * 100%)."""
+    w = bounds["x_max"] - bounds["x_min"]
+    h = bounds["y_max"] - bounds["y_min"]
+    pct = (h / w) * 100.0 if w > 0 else 56.25  # default ~16:9 if something odd
+    return f"{pct:.3f}%"
+
+
 def build_header() -> html.Div:
-    """Header with bigger, perfectly centered icon and left-aligned texts."""
+    """Header with bigger, centered icon and left-aligned texts, inside a centered container."""
     return html.Div(
         [
             html.Div(
@@ -259,26 +268,47 @@ def build_header() -> html.Div:
     )
 
 
-def build_top_row() -> html.Div:
-    """Top row with tracking graph and (optional) video."""
+def build_top_row(bounds: Dict[str, float]) -> html.Div:
+    """
+    Top row with tracking graph and (optional) video.
+    Both sides sit inside identical aspect-ratio boxes so they resize proportionally together.
+    """
+    # shared aspect ratio (height/width) taken from rink bounds
+    ar_padding = _aspect_padding_from_bounds(bounds)
+
     video_path = Path("assets") / VIDEO_FILENAME
-    right_panel_child = (
+    right_panel_child: html.Component = (
         html.Video(id="video-player", src=f"/assets/{VIDEO_FILENAME}", controls=True, className="sb-video")
         if video_path.exists()
-        else html.Div(f"Place a video at ./assets/{VIDEO_FILENAME}", style=STYLES["card_msg"])
+        else html.Div(f"Place a video at ./assets/{VIDEO_FILENAME}", className="sb-placeholder")
     )
 
     return html.Div(
         [
-            html.Div([dcc.Graph(id="tracking-graph", className="sb-graph")], className="sb-card"),
-            html.Div([right_panel_child], className="sb-card"),
+            html.Div(
+                [
+                    html.Div(
+                        [dcc.Graph(id="tracking-graph", className="sb-graph", config={"responsive": True})],
+                        className="sb-media__content",
+                    )
+                ],
+                className="sb-media",
+                style={"--ar": ar_padding},  # same aspect for both sides
+            ),
+            html.Div(
+                [
+                    html.Div([right_panel_child], className="sb-media__content")
+                ],
+                className="sb-media",
+                style={"--ar": ar_padding},  # same aspect for both sides
+            ),
         ],
         className="sb-grid-2col",
     )
 
 
 def build_bottom_panel(timestamps: list[int]) -> html.Div:
-    """Bottom tabs with playback controls and overlay editor."""
+    """Bottom tabs with playback controls and overlay editor, centered with container padding."""
     return html.Div(
         [
             dcc.Tabs(
@@ -324,7 +354,7 @@ def build_bottom_panel(timestamps: list[int]) -> html.Div:
                                         style={"marginTop": "14px"},
                                     ),
                                 ],
-                                style={**STYLES["card"], "margin": "16px 18px"},
+                                className="sb-card sb-card--padded",
                             )
                         ],
                     ),
@@ -370,14 +400,14 @@ def build_bottom_panel(timestamps: list[int]) -> html.Div:
                                         style={"marginTop": "12px"},
                                     ),
                                 ],
-                                style={**STYLES["card"], "margin": "16px 18px"},
+                                className="sb-card sb-card--padded",
                             )
                         ],
                     ),
                 ],
             )
         ],
-        style={"padding": "0 18px 24px"},
+        className="sb-bottom",
     )
 
 
@@ -404,9 +434,18 @@ def main():
     # Layout
     app.layout = html.Div(
         [
+            # Header (full-width) with centered inner container
             build_header(),
-            build_top_row(),
-            build_bottom_panel(timestamps),
+
+            # Main centered container
+            html.Div(
+                [
+                    build_top_row(RINK_BOUNDS),
+                    build_bottom_panel(timestamps),
+                ],
+                className="sb-container",
+            ),
+
             # State + timer
             dcc.Interval(id="play-interval", interval=100, disabled=True),
             dcc.Store(id="is-playing", data=False),
