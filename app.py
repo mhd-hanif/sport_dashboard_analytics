@@ -1,17 +1,16 @@
 """
 Sunbears Sports Analytics Dashboard (Dash)
 
-- Loads hockey tracking from two CSVs (Defense/Offense):
-  columns: timeframe, player_id, x, y  (timeframe -> timestamp)
+- Loads hockey tracking from two CSVs (Defense/Offense)
 - Top row: Digital Tracking (Plotly) + Video in proportional, rounded cards
 - Bottom tabs:
-  • Analysis Playback: compact controls + main scrubber + thin overview window (no cluttered numbers)
-  • Editor / Overlays: segmented team filter, chip-style overlay toggles, trail length
+  • Analysis Playback: centered control bar + single scrubber + frame readout
+  • Editor / Overlays: segmented team filter + chip overlays (incl. Coverage Control - soon)
 """
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 
 import pandas as pd
 import dash
@@ -36,11 +35,11 @@ ICON_IMAGE = "sunbears_icon.webp"     # header icon under ./assets/
 # Rink bounds (match your data)
 RINK_BOUNDS: Dict[str, float] = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_max": 30.0}
 
-# UI styles (inline-only bits)
+# Default trail length used if "Trails" overlay is enabled (no UI control now)
+TRAIL_DEFAULT = 40
+
 STYLES: Dict[str, Any] = {
     "page": {"background": "#f6f7fb", "fontFamily": "Inter, Segoe UI, Arial, sans-serif"},
-    "controls_row": {"display": "flex", "gap": "10px", "alignItems": "center"},
-    "controls_button": {"padding": "8px 12px", "borderRadius": "10px"},
 }
 
 
@@ -53,6 +52,8 @@ def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
     def _read_and_normalize(p: str, label: str) -> pd.DataFrame:
         df = pd.read_csv(p)
         df.columns = [c.strip() for c in df.columns]
+
+        # Map timeframe->timestamp; keep player_id, x, y
         col_map = {}
         for c in df.columns:
             lc = c.lower()
@@ -205,34 +206,6 @@ def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
     return f"{pct:.3f}%"
 
 
-def _overview_marks(n: int) -> Dict[int, str]:
-    """Sparse marks for overview: start • 25% • 50% • 75% • end."""
-    if n <= 1:
-        return {0: "0"}
-    end = n - 1
-    q1 = round(end * 0.25)
-    mid = round(end * 0.50)
-    q3 = round(end * 0.75)
-    uniq = sorted({0, q1, mid, q3, end})
-    return {i: str(i) for i in uniq}
-
-
-def _shift_window_to_include(win: Tuple[int, int], idx: int, total: int) -> Tuple[int, int]:
-    """Auto-pan the overview window so that idx is visible."""
-    start, end = win
-    start = max(0, min(start, total - 1))
-    end = max(start, min(end, total - 1))
-    if idx < start:
-        w = end - start
-        new_start = max(0, idx)
-        return new_start, min(total - 1, new_start + w)
-    if idx > end:
-        w = end - start
-        new_end = min(total - 1, idx)
-        return max(0, new_end - w), new_end
-    return start, end
-
-
 def build_header() -> html.Div:
     return html.Div(
         [
@@ -242,7 +215,7 @@ def build_header() -> html.Div:
                     html.Div(
                         [
                             html.H2("Sunbears Dashboard", className="sb-header__title"),
-                            html.Div("Digital Tracking • Analysis • Playback", className="sb-header__subtitle"),
+                            html.Div("Digital Tracking • Analytics • Playback", className="sb-header__subtitle"),
                         ],
                         className="sb-header__texts",
                     ),
@@ -277,8 +250,7 @@ def build_top_row(bounds: Dict[str, float]) -> html.Div:
 
 def build_bottom_panel(timestamps: List[int]) -> html.Div:
     n = len(timestamps)
-    window_size = min(200, max(20, n // 6))  # sensible default window
-    start, end = 0, min(n - 1, window_size)
+    start, end = 0, n - 1
 
     return html.Div(
         [
@@ -291,9 +263,10 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                         children=[
                             html.Div(
                                 [
-                                    # Controls row
+                                    # Centered control bar with right-aligned readout
                                     html.Div(
                                         [
+                                            html.Div(className="sb-controls-spacer"),  # left empty cell
                                             html.Div(
                                                 [
                                                     html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
@@ -319,14 +292,14 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                                         className="sb-chip-toggle",
                                                     ),
                                                 ],
-                                                className="sb-controls-left",
+                                                className="sb-ctlbar",  # the pill container
                                             ),
                                             html.Div(id="frame-readout", className="sb-readout"),
                                         ],
-                                        className="sb-controls",
+                                        className="sb-controls-grid",
                                     ),
 
-                                    # Main scrubber (no cluttered marks)
+                                    # Single scrubber
                                     html.Div(
                                         dcc.Slider(
                                             id="time-slider-main",
@@ -334,18 +307,6 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                             tooltip={"always_visible": False, "placement": "bottom"},
                                             updatemode="drag",
                                             className="sb-timeline",
-                                        ),
-                                        className="sb-card sb-card--padded",
-                                    ),
-
-                                    # Thin overview (range) with sparse marks
-                                    html.Div(
-                                        dcc.RangeSlider(
-                                            id="time-window",
-                                            min=0, max=n - 1, value=[start, end],
-                                            allowCross=False, pushable=1, step=1,
-                                            marks=_overview_marks(n),
-                                            className="sb-overview",
                                         ),
                                         className="sb-card sb-card--padded",
                                     ),
@@ -360,7 +321,7 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                         children=[
                             html.Div(
                                 [
-                                    # Team filter as segmented control
+                                    # Team filter segmented
                                     html.Div(
                                         [
                                             html.Div("Show team:", className="sb-label"),
@@ -379,7 +340,7 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                         className="sb-row",
                                     ),
 
-                                    # Overlay chips
+                                    # Overlay chips (with extra "Coverage Control (soon)")
                                     html.Div(
                                         [
                                             html.Div("Overlays:", className="sb-label"),
@@ -389,6 +350,7 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                                     {"label": "Show Players", "value": "players"},
                                                     {"label": "Show Trails", "value": "trails"},
                                                     {"label": "Show Voronoi", "value": "voronoi"},
+                                                    {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
                                                     {"label": "Pitch Control (soon)", "value": "pc", "disabled": True},
                                                     {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
                                                 ],
@@ -399,20 +361,6 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                             html.Button("Reset", id="btn-reset-editor", n_clicks=0, className="sb-link"),
                                         ],
                                         className="sb-row sb-row--wrap",
-                                    ),
-
-                                    # Trail length
-                                    html.Div(
-                                        [
-                                            html.Div("Trail length (frames):", className="sb-label"),
-                                            dcc.Slider(
-                                                id="trail-len",
-                                                min=5, max=200, step=5, value=40,
-                                                marks={5: "5", 40: "40", 200: "200"},
-                                                className="sb-slider",
-                                            ),
-                                        ],
-                                        className="sb-row",
                                     ),
                                 ],
                                 className="sb-panel",
@@ -456,121 +404,99 @@ def main():
         style=STYLES["page"],
     )
 
-    # ---- Toggle play/pause ----
-    @app.callback(
-        Output("is-playing", "data"),
-        Output("play-interval", "disabled"),
-        Output("btn-play", "children"),
-        Input("btn-play", "n_clicks"),
-        State("is-playing", "data"),
-        prevent_initial_call=True,
-    )
-    def toggle_play(n_clicks, is_playing):
-        new_state = not bool(is_playing)
-        return new_state, (not new_state), ("⏸ Pause" if new_state else "▶ Play")
-
-    # ---- Speed -> interval ----
+    # Speed -> interval
     @app.callback(Output("play-interval", "interval"), Input("speed-dropdown", "value"))
     def set_speed(mult):
         return int(100 * mult)  # base 100 ms
 
-    # ---- Advance frame + auto-pan overview window ----
+    # Playback driver: single source of truth for play/pause/prev/next/loop/end-stop
     @app.callback(
         Output("time-slider-main", "value"),
-        Output("time-window", "value"),
+        Output("is-playing", "data"),
+        Output("play-interval", "disabled"),
+        Output("btn-play", "children"),
         Input("play-interval", "n_intervals"),
         Input("btn-prev", "n_clicks"),
         Input("btn-next", "n_clicks"),
-        Input("time-window", "value"),
+        Input("btn-play", "n_clicks"),
+        State("loop-toggle", "value"),
         State("time-slider-main", "value"),
         State("timestamps", "data"),
-        State("loop-toggle", "value"),
+        State("is-playing", "data"),
         prevent_initial_call=True,
     )
-    def advance_frame(_tick, _prev, _next, win, cur_idx, ts_list, loop_val):
-        # Identify trigger
+    def playback_driver(_tick, _prev, _next, _play_clicks,
+                        loop_vals, cur_idx, ts_list, is_playing):
         ctx = dash.callback_context
         if not ctx.triggered:
             raise dash.exceptions.PreventUpdate
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
 
         total = len(ts_list)
-        start, end = win
-        # Ensure window sane
-        start = max(0, min(start, total - 1))
-        end = max(start, min(end, total - 1))
-        window = (start, end)
+        last = total - 1
+        loop = "loop" in (loop_vals or [])
 
-        def clamp_to_window(idx: int, w: Tuple[int, int]) -> int:
-            return max(w[0], min(idx, w[1]))
+        def label(paused: bool) -> str:
+            return "⏸ Pause" if paused else "▶ Play"
 
-        # 1) If user changed the window, clamp the current index into it
-        if trigger == "time-window":
-            return clamp_to_window(cur_idx, window), [window[0], window[1]]
+        # Play/Pause button toggled
+        if trigger == "btn-play":
+            new_playing = not bool(is_playing)
+            new_idx = cur_idx
+            # if starting from end, restart at beginning
+            if new_playing and cur_idx >= last:
+                new_idx = 0
+            return new_idx, new_playing, (not new_playing), label(new_playing)
 
-        # 2) Prev / Next buttons
+        # Previous frame
         if trigger == "btn-prev":
-            nxt = max(0, cur_idx - 1)
-            window = _shift_window_to_include(window, nxt, total)
-            return nxt, [window[0], window[1]]
+            if loop and cur_idx == 0:
+                new_idx = last
+            else:
+                new_idx = max(0, cur_idx - 1)
+            return new_idx, is_playing, (not is_playing), label(is_playing)
 
+        # Next frame
         if trigger == "btn-next":
-            nxt = min(total - 1, cur_idx + 1)
-            window = _shift_window_to_include(window, nxt, total)
-            return nxt, [window[0], window[1]]
+            if loop and cur_idx == last:
+                new_idx = 0
+            else:
+                new_idx = min(last, cur_idx + 1)
+            return new_idx, is_playing, (not is_playing), label(is_playing)
 
-        # 3) Interval tick (playback)
+        # Timer tick during playback
         if trigger == "play-interval":
+            if not is_playing:
+                raise dash.exceptions.PreventUpdate
             nxt = cur_idx + 1
-            if nxt >= total:
-                # wrap if loop
-                if "loop" in (loop_val or []):
-                    nxt = 0
-                    # reset window to start range with same size
-                    size = max(1, window[1] - window[0])
-                    window = (0, min(total - 1, size))
+            if nxt > last:
+                if loop:
+                    return 0, True, False, "⏸ Pause"  # wrap & keep playing
                 else:
-                    nxt = total - 1  # clamp to end
-            # Auto-pan window if needed
-            window = _shift_window_to_include(window, nxt, total)
-            return nxt, [window[0], window[1]]
+                    return last, False, True, "▶ Play"  # stop at end, show Play
+            return nxt, True, False, "⏸ Pause"
 
-        # Fallback
         raise dash.exceptions.PreventUpdate
 
-    # ---- Keep main slider bounds synced with overview window ----
-    @app.callback(
-        Output("time-slider-main", "min"),
-        Output("time-slider-main", "max"),
-        Input("time-window", "value"),
-    )
-    def sync_main_slider_bounds(win):
-        return win[0], win[1]
-
-    # ---- Readout text ----
-    @app.callback(
-        Output("frame-readout", "children"),
-        Input("time-slider-main", "value"),
-        State("timestamps", "data"),
-    )
+    # Frame readout (top-right)
+    @app.callback(Output("frame-readout", "children"), Input("time-slider-main", "value"), State("timestamps", "data"))
     def update_readout(idx, ts_list):
         return f"Frame {idx} / {len(ts_list) - 1}"
 
-    # ---- Graph update ----
+    # Graph update
     @app.callback(
         Output("tracking-graph", "figure"),
         Input("time-slider-main", "value"),
         Input("overlay-options", "value"),
         Input("team-filter", "value"),
-        State("trail-len", "value"),
     )
-    def update_figure(time_index: int, overlay_values, team_filter, trail_len):
+    def update_figure(time_index: int, overlay_values, team_filter):
         current_timestamp = timestamps[time_index]
         df_frame = df[df["timestamp"] == current_timestamp]
         show_players = "players" in overlay_values
         show_voronoi = "voronoi" in overlay_values
         show_trails = "trails" in overlay_values
-        trails_df = make_trails(df, current_timestamp, trail_len) if show_trails else None
+        trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
 
         return build_tracking_figure(
             df_frame=df_frame,
@@ -582,16 +508,15 @@ def main():
             trails_df=trails_df,
         )
 
-    # ---- Reset editor to defaults ----
+    # Reset editor to defaults
     @app.callback(
         Output("team-filter", "value"),
         Output("overlay-options", "value"),
-        Output("trail-len", "value"),
         Input("btn-reset-editor", "n_clicks"),
         prevent_initial_call=True,
     )
     def reset_editor(_n):
-        return "both", ["players", "voronoi"], 40
+        return "both", ["players", "voronoi"]
 
     app.run(debug=True)
 
