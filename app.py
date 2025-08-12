@@ -25,7 +25,7 @@ VIDEO_FILENAME = "sample_video.mp4"
 FIELD_IMAGE = "field_hockey.png"   # place this under ./assets/
 
 # --------- Rink bounds (meters; NHL 200x85 ft -> 60.96 x 25.91) ----------
-RINK_BOUNDS = {"x_min": 0.0, "x_max": 60.96, "y_min": 0.0, "y_max": 25.91}
+RINK_BOUNDS = {"x_min": 0.0, "x_max": 61, "y_min": 0.0, "y_max": 30}
 
 
 # --------- Data loading ---------
