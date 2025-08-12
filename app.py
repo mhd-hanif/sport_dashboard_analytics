@@ -1,12 +1,12 @@
 """
 Sunbears Sports Analytics Dashboard (Dash)
 
-- Loads hockey tracking from two CSVs (Defense/Offense) with columns:
-  timeframe, player_id, x, y  (timeframe -> timestamp)
+- Loads hockey tracking from two CSVs (Defense/Offense):
+  columns: timeframe, player_id, x, y  (timeframe -> timestamp)
 - Side-by-side: Digital Tracking (Plotly) + Video
 - Bottom tabs: Playback + Editor/Overlays
 - Animation (Play/Pause/Prev/Next/Speed), team filter, trails, Voronoi
-- Rink rendered from a background image covering the plotting area
+- Rink drawn via background image stretched to tracking bounds
 """
 
 from pathlib import Path
@@ -18,19 +18,21 @@ import plotly.graph_objs as go
 
 from utils import compute_voronoi  # Voronoi + clipping
 
-# --------- Files (adjust if needed) ----------
+# ---------- Files ----------
 DEFENSIVE_CSV = "assets/defensive_players_hockey.csv"
 OFFENSIVE_CSV = "assets/offensive_players_hockey.csv"
-VIDEO_FILENAME = "sample_video.mp4"
-FIELD_IMAGE = "field_hockey.png"   # place this under ./assets/
+VIDEO_FILENAME = "sample_video.mp4"     # place under ./assets/ (optional)
+FIELD_IMAGE = "field_hockey.png"        # rink image under ./assets/
+ICON_IMAGE = "sunbears_icon.webp"       # header icon under ./assets/
 
-# --------- Rink bounds (meters; NHL 200x85 ft -> 60.96 x 25.91) ----------
-RINK_BOUNDS = {"x_min": 0.0, "x_max": 61, "y_min": 0.0, "y_max": 30}
+# ---------- Rink bounds (match your data) ----------
+RINK_BOUNDS = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_max": 30.0}
 
 
-# --------- Data loading ---------
+# ---------- Data loading ----------
 def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
     """Read both CSVs, normalize columns, add team labels, sort by time."""
+
     def _read_and_normalize(p: str, label: str) -> pd.DataFrame:
         df = pd.read_csv(p)
         df.columns = [c.strip() for c in df.columns]
@@ -48,7 +50,9 @@ def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
         required = {"timestamp", "player_id", "x", "y"}
         missing = required - set(df.columns)
         if missing:
-            raise ValueError(f"Missing columns in {label} data: {missing}. Found: {list(df.columns)}")
+            raise ValueError(
+                f"Missing columns in {label} data: {missing}. Found: {list(df.columns)}"
+            )
 
         df["timestamp"] = df["timestamp"].astype(int)
         df["player_id"] = df["player_id"].astype(str)
@@ -67,7 +71,7 @@ def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
     return df
 
 
-# --------- Figure builder ---------
+# ---------- Figure builder ----------
 def build_tracking_figure(
     df_frame: pd.DataFrame,
     bounds: dict,
@@ -79,20 +83,32 @@ def build_tracking_figure(
 ) -> go.Figure:
     data = []
 
+    # display-only clamp (keeps markers inside if a point is slightly out)
+    def _clamp_df(df_):
+        if df_ is None or df_.empty:
+            return df_
+        df_ = df_.copy()
+        df_["x"] = df_["x"].clip(bounds["x_min"], bounds["x_max"])
+        df_["y"] = df_["y"].clip(bounds["y_min"], bounds["y_max"])
+        return df_
+
+    df_frame = _clamp_df(df_frame)
+    trails_df = _clamp_df(trails_df)
+
     # team filter
     if team_filter != "both":
         keep = "Offense" if team_filter == "offense" else "Defense"
         df_frame = df_frame[df_frame["team"] == keep]
+        if trails_df is not None:
+            trails_df = trails_df[trails_df["team"] == keep]
 
     # trails
     if show_trails and trails_df is not None and not trails_df.empty:
-        if team_filter != "both":
-            keep = "Offense" if team_filter == "offense" else "Defense"
-            trails_df = trails_df[trails_df["team"] == keep]
         for (_, _pid), seg in trails_df.groupby(["team", "player_id"]):
             data.append(
                 go.Scatter(
-                    x=seg["x"], y=seg["y"],
+                    x=seg["x"],
+                    y=seg["y"],
                     mode="lines",
                     line=dict(width=2),
                     opacity=0.35,
@@ -110,9 +126,14 @@ def build_tracking_figure(
                 continue
             data.append(
                 go.Scatter(
-                    x=sub["x"], y=sub["y"],
+                    x=sub["x"],
+                    y=sub["y"],
                     mode="markers+text",
-                    marker=dict(size=12, color=color_map[team], line=dict(width=1, color="white")),
+                    marker=dict(
+                        size=12,
+                        color=color_map[team],
+                        line=dict(width=1, color="white"),
+                    ),
                     text=sub["player_id"],
                     textposition="middle center",
                     name=team,
@@ -138,7 +159,8 @@ def build_tracking_figure(
             xs, ys = list(xs) + [xs[0]], list(ys) + [ys[0]]
             data.append(
                 go.Scatter(
-                    x=xs, y=ys,
+                    x=xs,
+                    y=ys,
                     fill="toself",
                     fillcolor=palette[idx % len(palette)],
                     line=dict(color="rgba(0,0,0,0.12)", width=1),
@@ -147,15 +169,15 @@ def build_tracking_figure(
                 )
             )
 
-    # base figure with background image as the rink
+    # base figure + rink image
     fig = go.Figure(data=data)
-
-    # Add the rink image under all traces (stretched to bounds in axis units)
     fig.add_layout_image(
         dict(
             source=f"/assets/{FIELD_IMAGE}",
-            xref="x", yref="y",
-            x=bounds["x_min"], y=bounds["y_max"],
+            xref="x",
+            yref="y",
+            x=bounds["x_min"],
+            y=bounds["y_max"],  # top-left corner in data coords
             sizex=bounds["x_max"] - bounds["x_min"],
             sizey=bounds["y_max"] - bounds["y_min"],
             sizing="stretch",
@@ -165,9 +187,20 @@ def build_tracking_figure(
     )
 
     fig.update_layout(
-        xaxis=dict(range=[bounds["x_min"], bounds["x_max"]], showgrid=False, zeroline=False, visible=False),
-        yaxis=dict(range=[bounds["y_min"], bounds["y_max"]], showgrid=False, zeroline=False, visible=False,
-                   scaleanchor="x", scaleratio=1),
+        xaxis=dict(
+            range=[bounds["x_min"], bounds["x_max"]],
+            showgrid=False,
+            zeroline=False,
+            visible=False,
+        ),
+        yaxis=dict(
+            range=[bounds["y_min"], bounds["y_max"]],
+            showgrid=False,
+            zeroline=False,
+            visible=False,
+            scaleanchor="x",
+            scaleratio=1,
+        ),
         margin=dict(l=12, r=12, t=12, b=12),
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
@@ -181,11 +214,13 @@ def make_trails(df: pd.DataFrame, current_ts: int, trail_len: int) -> pd.DataFra
     return df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= current_ts)]
 
 
-# --------- App ---------
+# ---------- App ----------
 def main():
     # load data
     if not Path(DEFENSIVE_CSV).exists() or not Path(OFFENSIVE_CSV).exists():
-        raise FileNotFoundError(f"CSV files not found:\n - {DEFENSIVE_CSV}\n - {OFFENSIVE_CSV}")
+        raise FileNotFoundError(
+            f"CSV files not found:\n - {DEFENSIVE_CSV}\n - {OFFENSIVE_CSV}"
+        )
     df = load_tracking_data(DEFENSIVE_CSV, OFFENSIVE_CSV)
     timestamps = sorted(df["timestamp"].unique())
     if not timestamps:
@@ -194,7 +229,7 @@ def main():
     app: Dash = dash.Dash(__name__)
     app.title = "Sunbears Dashboard"
 
-    # ---- simple, clean styling tokens ----
+    # basic “card”/page styling
     CARD = {
         "background": "#ffffff",
         "borderRadius": "14px",
@@ -205,17 +240,38 @@ def main():
 
     app.layout = html.Div(
         [
-            # header
+            # header with icon
             html.Div(
                 [
-                    html.H2("Sunbears Dashboard", style={"margin": 0, "fontWeight": 700}),
-                    html.Div("Digital Tracking • Analysis • Playback", style={"color": "#6b7280", "fontSize": "14px"}),
+                    html.Div(
+                        [
+                            html.Img(
+                                src=f"/assets/{ICON_IMAGE}",
+                                style={"height": "36px", "marginRight": "10px", "borderRadius": "6px"},
+                            ),
+                            html.H2(
+                                "Sunbears Dashboard",
+                                style={"margin": 0, "fontWeight": 700, "color": "#0d67b6", "display": "inline-block", "verticalAlign": "middle"},
+                            ),
+                        ],
+                        style={"display": "flex", "alignItems": "center"},
+                    ),
+                    html.Div(
+                        "Digital Tracking • Analysis • Playback",
+                        style={"color": "#6b7280", "fontSize": "14px"},
+                    ),
                 ],
-                style={"padding": "16px 18px", "borderBottom": "1px solid #eee", "background": "#ffffff",
-                       "position": "sticky", "top": 0, "zIndex": 1},
+                style={
+                    "padding": "16px 18px",
+                    "borderBottom": "1px solid #eee",
+                    "background": "#ffffff",
+                    "position": "sticky",
+                    "top": 0,
+                    "zIndex": 1,
+                },
             ),
 
-            # top row
+            # top row: tracking + video
             html.Div(
                 [
                     html.Div([dcc.Graph(id="tracking-graph", style={"height": "520px", "width": "100%"})], style=CARD),
@@ -231,15 +287,10 @@ def main():
                         style=CARD,
                     ),
                 ],
-                style={
-                    "display": "grid",
-                    "gridTemplateColumns": "1fr 1fr",
-                    "gap": "16px",
-                    "padding": "18px",
-                },
+                style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "16px", "padding": "18px"},
             ),
 
-            # bottom panel
+            # bottom panel (tabs)
             html.Div(
                 [
                     dcc.Tabs(
@@ -255,12 +306,18 @@ def main():
                                         [
                                             html.Div(
                                                 [
-                                                    html.Button("⏮ Prev", id="btn-prev", n_clicks=0,
-                                                                style={"padding": "8px 12px", "borderRadius": "10px"}),
-                                                    html.Button("▶ Play", id="btn-play", n_clicks=0,
-                                                                style={"padding": "8px 12px", "borderRadius": "10px"}),
-                                                    html.Button("Next ⏭", id="btn-next", n_clicks=0,
-                                                                style={"padding": "8px 12px", "borderRadius": "10px"}),
+                                                    html.Button(
+                                                        "⏮ Prev", id="btn-prev", n_clicks=0,
+                                                        style={"padding": "8px 12px", "borderRadius": "10px"},
+                                                    ),
+                                                    html.Button(
+                                                        "▶ Play", id="btn-play", n_clicks=0,
+                                                        style={"padding": "8px 12px", "borderRadius": "10px"},
+                                                    ),
+                                                    html.Button(
+                                                        "Next ⏭", id="btn-next", n_clicks=0,
+                                                        style={"padding": "8px 12px", "borderRadius": "10px"},
+                                                    ),
                                                     dcc.Dropdown(
                                                         id="speed-dropdown",
                                                         options=[
@@ -279,7 +336,11 @@ def main():
                                             html.Div(
                                                 dcc.Slider(
                                                     id="time-slider",
-                                                    min=0, max=len(timestamps) - 1, value=0, step=1, updatemode="drag",
+                                                    min=0,
+                                                    max=len(timestamps) - 1,
+                                                    value=0,
+                                                    step=1,
+                                                    updatemode="drag",
                                                 ),
                                                 style={"marginTop": "14px"},
                                             ),
@@ -348,7 +409,7 @@ def main():
         style=PAGE,
     )
 
-    # --------- Callbacks ---------
+    # ---------- Callbacks ----------
 
     @app.callback(
         Output("is-playing", "data"),
