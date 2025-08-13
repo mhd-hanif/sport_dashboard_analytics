@@ -12,6 +12,13 @@ Sunbears Sports Analytics Dashboard (Dash)
   • Drag players by moving the circle (move-only; fixed radius). Jersey numbers follow automatically.
   • Voronoi recomputes instantly from edited positions
   • Changing frame OR switching modes clears edits; returning to a frame shows original data
+
+Sync rules in this build:
+- Play/Pause controls BOTH tracking & video
+- Speed (0.5×, 1×, 2×) applied to BOTH
+- Loop ON: both restart
+- Loop OFF: shorter stops first; longer continues; Play button shows "Pause" until BOTH stopped
+- Soft sync (no seeking)
 """
 
 from __future__ import annotations
@@ -59,6 +66,9 @@ VORONOI_FILL = {
     "Defense": "rgba(223,233,249,0.55)",  # #dfe9f9 @ 55%
     "Offense": "rgba(248,223,220,0.55)",  # #f8dfdc @ 55%
 }
+
+# Shared timer base at 1× speed (ms)
+BASE_INTERVAL_MS = 100.0
 
 
 # --------------------------------------------------------------------------------------
@@ -375,18 +385,17 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                         className="sb-segment sb-mode",
                                     ),
                                     html.Span(className="sb-ctlbar__sep"),
-                                    html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
                                     html.Button("▶ Play", id="btn-play", n_clicks=0, className="sb-btn", disabled=False),
+                                    html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
                                     html.Button("Next ⏭", id="btn-next", n_clicks=0, className="sb-btn"),
                                     dcc.Dropdown(
                                         id="speed-dropdown",
                                         options=[
-                                            {"label": "0.5×", "value": 2},
-                                            {"label": "1.0×", "value": 1},
-                                            {"label": "2.0×", "value": 0.5},
-                                            {"label": "4.0×", "value": 0.25},
+                                            {"label": "0.5×", "value": 0.5},
+                                            {"label": "1.0×", "value": 1.0},
+                                            {"label": "2.0×", "value": 2.0},
                                         ],
-                                        value=1,
+                                        value=1.0,
                                         clearable=False,
                                         className="sb-speed",
                                         style={"width": "120px"},
@@ -495,32 +504,42 @@ def main():
             build_header(),
             html.Div([build_top_row(RINK_BOUNDS), build_bottom_panel(timestamps)], className="sb-container"),
             # timers & state
-            dcc.Interval(id="play-interval", interval=100, disabled=True),
+            dcc.Interval(id="play-interval", interval=int(BASE_INTERVAL_MS), disabled=True),
+            dcc.Interval(id="video-poll", interval=500, n_intervals=0),  # poll <video> state
             dcc.Store(id="is-playing", data=False),
             dcc.Store(id="timestamps", data=timestamps),
             dcc.Store(id="edits-store", data={}),          # { "ts": { "Team|player": {"x":..,"y":..,"team":..} } }
             dcc.Store(id="shape-index-map", data=[]),      # ["Team|player", ...] aligned with layout.shapes order
+
+            # Video sync plumbing
+            dcc.Store(id="video-ctrl", data=None),         # commands to video: {action:'play'|'pause', restart?:bool, token?:str}
+            dcc.Store(id="video-state", data={"playing": False, "ended": False}),  # polled state
         ],
         className="sb-page",
         style=STYLES["page"],
     )
 
-    # Speed -> interval
+    # Speed -> interval (shared between figure & video)
     @app.callback(Output("play-interval", "interval"), Input("speed-dropdown", "value"))
-    def set_speed(mult):
-        return int(100 * mult)  # base 100 ms
+    def set_speed(rate):
+        try:
+            rate = float(rate or 1.0)
+            rate = max(0.1, min(2.0, rate))
+        except Exception:
+            rate = 1.0
+        return int(max(20, BASE_INTERVAL_MS / rate))  # 0.5× => 200ms, 2× => 50ms
 
     # Disable Play button in Editor Mode (to avoid conflicts)
     @app.callback(Output("btn-play", "disabled"), Input("mode-selector", "value"))
     def toggle_play_disabled(mode):
         return mode == "editor"
 
-    # Playback driver: unified source of truth (+ auto-pause when switching to Editor)
+    # --- Playback driver (tracking + issuing video commands). No dependency on video-state. ---
     @app.callback(
         Output("time-slider-main", "value"),
         Output("is-playing", "data"),
         Output("play-interval", "disabled"),
-        Output("btn-play", "children"),
+        Output("video-ctrl", "data"),
         Input("play-interval", "n_intervals"),
         Input("btn-prev", "n_clicks"),
         Input("btn-next", "n_clicks"),
@@ -541,50 +560,53 @@ def main():
 
         total = len(ts_list)
         last = total - 1
-        loop = "loop" in (loop_vals or [])
+        loop_on = "loop" in (loop_vals or [])
 
-        def label(paused: bool) -> str:
-            return "⏸ Pause" if paused else "▶ Play"
-
-        # Mode switched -> enforce pause (clear happens in edits-manager)
+        # Mode switched -> pause both (unique token)
         if trigger == "mode-selector":
-            return cur_idx, False, True, "▶ Play"
+            return cur_idx, False, True, {"action": "pause", "token": f"mode:{mode}:{cur_idx}"}
 
-        # Play/Pause
+        # Play/Pause button toggled
         if trigger == "btn-play":
             new_playing = not bool(is_playing)
             new_idx = cur_idx
             if new_playing and cur_idx >= last:
-                new_idx = 0
-            return new_idx, new_playing, (not new_playing), label(new_playing)
+                new_idx = 0  # restart tracking if at end
+            vid_cmd = {"action": "pause", "token": f"btn:{_play_clicks}:pause"}
+            if new_playing:
+                # restart video too if it had ended
+                vid_cmd = {"action": "play", "restart": True, "token": f"btn:{_play_clicks}:play"}
+            return new_idx, new_playing, (not new_playing), vid_cmd
 
-        # Prev
+        # Previous frame
         if trigger == "btn-prev":
-            if loop and cur_idx == 0:
+            if loop_on and cur_idx == 0:
                 new_idx = last
             else:
                 new_idx = max(0, cur_idx - 1)
-            return new_idx, is_playing, (not is_playing), label(is_playing)
+            return new_idx, is_playing, (not is_playing), dash.no_update
 
-        # Next
+        # Next frame
         if trigger == "btn-next":
-            if loop and cur_idx == last:
+            if loop_on and cur_idx == last:
                 new_idx = 0
             else:
                 new_idx = min(last, cur_idx + 1)
-            return new_idx, is_playing, (not is_playing), label(is_playing)
+            return new_idx, is_playing, (not is_playing), dash.no_update
 
-        # Timer tick
+        # Timer tick during playback
         if trigger == "play-interval":
             if not is_playing or mode == "editor":
                 raise dash.exceptions.PreventUpdate
             nxt = cur_idx + 1
             if nxt > last:
-                if loop:
-                    return 0, True, False, "⏸ Pause"
+                if loop_on:
+                    # wrap tracking; video looping handled on client
+                    return 0, True, False, dash.no_update
                 else:
-                    return last, False, True, "▶ Play"
-            return nxt, True, False, "⏸ Pause"
+                    # tracking ends first: allow video to continue (no pause/play command)
+                    return last, False, True, dash.no_update
+            return nxt, True, False, dash.no_update
 
         raise dash.exceptions.PreventUpdate
 
@@ -602,7 +624,7 @@ def main():
         Input("overlay-options", "value"),
         Input("team-filter", "value"),
         Input("mode-selector", "value"),
-        Input("edits-store", "data"),          # now an Input so drags re-render the figure
+        Input("edits-store", "data"),
         State("timestamps", "data"),
     )
     def update_figure(time_index: int, overlay_values, team_filter, mode, edits_store, ts_list):
@@ -616,7 +638,7 @@ def main():
         edits_for_ts = (edits_store or {}).get(ts_key, {}) if mode == "editor" else {}
         df_frame = _apply_edits_to_frame(df_frame, edits_for_ts)
 
-        # Prepare trails (apply edits to trails only in editor for visual consistency)
+        # Trails (apply edits to trails only in editor)
         show_trails = "trails" in (overlay_values or [])
         trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
         if trails_df is not None and mode == "editor":
@@ -641,7 +663,7 @@ def main():
                 "displayModeBar": True,
                 "editable": True,
                 "edits": {
-                    "shapePosition": True,     # move allowed; we snap size back on re-render
+                    "shapePosition": True,
                     "annotationPosition": False,
                     "annotationText": False,
                     "titleText": False,
@@ -654,9 +676,7 @@ def main():
 
         return fig, shape_map, cfg
 
-    # Edits manager:
-    # - Clear ALL edits on frame change OR mode change (ephemeral edits by design)
-    # - Update edits on shape drag using centers; ignore size changes
+    # Edits manager (ephemeral)
     @app.callback(
         Output("edits-store", "data"),
         Input("tracking-graph", "relayoutData"),
@@ -674,19 +694,16 @@ def main():
             raise dash.exceptions.PreventUpdate
         trigger = ctx.triggered[0]["prop_id"].split(".")[0]
 
-        # Clear edits whenever time frame changes OR mode changes (either way)
+        # Clear edits on frame OR mode change
         if trigger == "time-slider-main" or trigger == "mode-selector":
             return {}
 
-        # If not editor or players overlay off, ignore
         if mode != "editor" or "players" not in (overlays or []):
             raise dash.exceptions.PreventUpdate
 
-        # Process drag events
         if not relayout or not isinstance(relayout, dict) or not shape_map:
             raise dash.exceptions.PreventUpdate
 
-        # Collect bbox edits for each shape index
         per_idx: Dict[int, Dict[str, float]] = {}
         for k, v in relayout.items():
             if not (k.startswith("shapes[") and "]" in k):
@@ -712,7 +729,6 @@ def main():
         ts_key = str(ts_list[time_idx])
         edits_store.setdefault(ts_key, {})
 
-        # Convert bbox to center; ignore any size changes (fixed PLAYER_RADIUS on re-render)
         for idx, bbox in per_idx.items():
             if idx < 0 or idx >= len(shape_map):
                 continue
@@ -725,6 +741,72 @@ def main():
             edits_store[ts_key][key] = {"x": float(cx), "y": float(cy), "team": team}
 
         return edits_store
+
+    # --- CLIENTSIDE: control HTML5 <video> (play/pause/rate/loop) with command de-dup + report state ---
+    app.clientside_callback(
+        """
+        function(cmd, speedVal, loopVals, _poll) {
+            const video = document.getElementById("video-player");
+            const state = {playing: false, ended: false};
+
+            if (!video) {
+                return state;
+            }
+
+            // Shared speed (0.5, 1, 2) - changing speed must NOT start playback
+            if (speedVal !== undefined && speedVal !== null) {
+                try { video.playbackRate = Number(speedVal) || 1.0; } catch (e) {}
+            }
+
+            // Loop flag - changing loop must NOT start playback
+            try { video.loop = Array.isArray(loopVals) && loopVals.indexOf("loop") !== -1; } catch (e) {}
+
+            // --- Command de-dup: apply only if token is new ---
+            try {
+                const lastTok = window.__sb_last_cmd_token || null;
+                const tok = cmd && cmd.token ? String(cmd.token) : null;
+
+                if (cmd && cmd.action && tok && tok !== lastTok) {
+                    window.__sb_last_cmd_token = tok;
+
+                    if (cmd.action === "play") {
+                        if (cmd.restart && (video.ended || (video.duration && video.currentTime >= video.duration - 0.01))) {
+                            video.currentTime = 0;
+                        }
+                        video.play();
+                    } else if (cmd.action === "pause") {
+                        video.pause();
+                    }
+                }
+            } catch (e) {}
+
+            // Report live state (polled)
+            try {
+                state.ended = !!video.ended;
+                state.playing = !(video.paused || video.ended);
+            } catch (e) {}
+
+            return state;
+        }
+        """,
+        Output("video-state", "data"),
+        [Input("video-ctrl", "data"),
+         Input("speed-dropdown", "value"),
+         Input("loop-toggle", "value"),
+         Input("video-poll", "n_intervals")],
+    )
+
+    # --- CLIENTSIDE: button label (union of tracking/video states) ---
+    app.clientside_callback(
+        """
+        function(isPlaying, vstate) {
+            const vp = vstate && vstate.playing;
+            return (isPlaying || vp) ? "⏸ Pause" : "▶ Play";
+        }
+        """,
+        Output("btn-play", "children"),
+        [Input("is-playing", "data"), Input("video-state", "data")],
+    )
 
     # Reset editor to defaults
     @app.callback(
