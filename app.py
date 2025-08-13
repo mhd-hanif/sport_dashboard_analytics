@@ -385,8 +385,8 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                         className="sb-segment sb-mode",
                                     ),
                                     html.Span(className="sb-ctlbar__sep"),
-                                    html.Button("▶ Play", id="btn-play", n_clicks=0, className="sb-btn", disabled=False),
                                     html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
+                                    html.Button("▶ Play", id="btn-play", n_clicks=0, className="sb-btn", disabled=False),
                                     html.Button("Next ⏭", id="btn-next", n_clicks=0, className="sb-btn"),
                                     dcc.Dropdown(
                                         id="speed-dropdown",
