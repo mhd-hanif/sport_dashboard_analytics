@@ -80,7 +80,7 @@
 
 /* ---------- Timeline (single scrubber) ---------- */
 .sb-card { background: transparent; border-radius: 12px; padding: 8px 10px; }
-.sb-card--padded { margin: 0; } /* keep edges tight inside suite */
+.sb-card--padded { margin: 0; }
 .sb-timeline .rc-slider { padding: 14px 8px; }
 .sb-timeline .rc-slider-rail { height: 8px; background: #e5e7eb; }
 .sb-timeline .rc-slider-track { height: 8px; background: #0d67b6; }
@@ -88,7 +88,7 @@
 .sb-timeline .rc-slider-mark { display: none; }
 
 /* ---------- Editor layout ---------- */
-.sb-editor { position: relative; } /* non-empty to satisfy linters */
+.sb-editor { position: relative; }
 .sb-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
 .sb-row--wrap { flex-wrap: wrap; }
 .sb-label { font-weight: 600; color: #111827; min-width: 140px; }

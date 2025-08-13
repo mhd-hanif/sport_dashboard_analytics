@@ -9,7 +9,8 @@ Sunbears Sports Analytics Dashboard (Dash)
   • Editor controls (team filter + overlay chips + Reset)
 - Editor Mode:
   • Playback auto-pauses, Play button disabled
-  • Players become draggable circles; moving them updates positions for the current frame
+  • Players become draggable circles (move-only visual effect; size stays fixed)
+  • Jersey numbers move with players
   • Voronoi recomputes instantly from edited positions
 """
 
@@ -41,7 +42,7 @@ ICON_IMAGE = "sunbears_icon.webp"     # header icon under ./assets/
 # Rink bounds (match your data)
 RINK_BOUNDS: Dict[str, float] = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_max": 30.0}
 
-# Default trail length used if "Trails" overlay is enabled (no UI control now)
+# Default trail length used if "Trails" overlay is enabled
 TRAIL_DEFAULT = 40
 
 # Player circle radius for Editor Mode (rink-units)
@@ -55,8 +56,8 @@ COLOR_MAP = {"Offense": "#e74c3c", "Defense": "#2e86de"}
 
 # Voronoi fill colors (light, slightly transparent)
 VORONOI_FILL = {
-    "Defense": "rgba(223,233,249,0.55)",  # #dfe9f9 @ 55% alpha
-    "Offense": "rgba(248,223,220,0.55)",  # #f8dfdc @ 55% alpha
+    "Defense": "rgba(223,233,249,0.55)",  # #dfe9f9 @ 55%
+    "Offense": "rgba(248,223,220,0.55)",  # #f8dfdc @ 55%
 }
 
 
@@ -129,6 +130,7 @@ def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
 
 
 def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
+    """Apply per-frame edited positions to a single-frame dataframe."""
     if not edits_for_ts:
         return df_frame
     df_frame = df_frame.copy()
@@ -141,6 +143,7 @@ def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[s
 
 
 def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any]) -> pd.DataFrame:
+    """Optionally reflect edited positions on the recent trail segment for visual continuity."""
     if not isinstance(edits_store, dict) or trails_df.empty:
         return trails_df
     trails_df = trails_df.copy()
@@ -238,13 +241,15 @@ def build_tracking_figure(
     )
     fig.update_layout(
         autosize=True,
+        uirevision="static",  # keep view stable across updates
+        showlegend=False,     # eliminate legend-driven jiggle
+        title=None,           # avoid title placeholders
         xaxis=dict(range=[bounds["x_min"], bounds["x_max"]], showgrid=False, zeroline=False, visible=False),
         yaxis=dict(range=[bounds["y_min"], bounds["y_max"]], showgrid=False, zeroline=False,
                    visible=False, scaleanchor="x", scaleratio=1),
         margin=dict(l=12, r=12, t=12, b=12),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         hovermode="closest",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
 
     # players: markers (playback) OR draggable shapes (editor)
@@ -290,7 +295,8 @@ def build_tracking_figure(
                     go.Scatter(
                         x=sub["x"], y=sub["y"], mode="markers+text",
                         marker=dict(size=12, color=COLOR_MAP[team], line=dict(width=1, color="white")),
-                        text=sub["player_id"], textposition="middle center", name=team,
+                        text=sub["player_id"], textposition="middle center",
+                        showlegend=False,
                     )
                 )
 
@@ -415,7 +421,7 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
 
                     html.Div(className="sb-divider"),
 
-                    # Editor/Overlay controls (inside the same suite)
+                    # Editor/Overlay controls
                     html.Div(
                         [
                             html.Div(
@@ -544,7 +550,7 @@ def main():
         if trigger == "mode-selector":
             return cur_idx, False, True, "▶ Play"
 
-        # Play/Pause button toggled (only in playback; button disabled in editor)
+        # Play/Pause
         if trigger == "btn-play":
             new_playing = not bool(is_playing)
             new_idx = cur_idx
@@ -552,7 +558,7 @@ def main():
                 new_idx = 0
             return new_idx, new_playing, (not new_playing), label(new_playing)
 
-        # Previous frame
+        # Prev
         if trigger == "btn-prev":
             if loop and cur_idx == 0:
                 new_idx = last
@@ -560,7 +566,7 @@ def main():
                 new_idx = max(0, cur_idx - 1)
             return new_idx, is_playing, (not is_playing), label(is_playing)
 
-        # Next frame
+        # Next
         if trigger == "btn-next":
             if loop and cur_idx == last:
                 new_idx = 0
@@ -568,7 +574,7 @@ def main():
                 new_idx = min(last, cur_idx + 1)
             return new_idx, is_playing, (not is_playing), label(is_playing)
 
-        # Timer tick during playback
+        # Timer tick
         if trigger == "play-interval":
             if not is_playing or mode == "editor":
                 raise dash.exceptions.PreventUpdate
@@ -582,7 +588,7 @@ def main():
 
         raise dash.exceptions.PreventUpdate
 
-    # Frame readout (top-right)
+    # Frame readout
     @app.callback(Output("frame-readout", "children"), Input("time-slider-main", "value"), State("timestamps", "data"))
     def update_readout(idx, ts_list):
         return f"Frame {idx} / {len(ts_list) - 1}"
@@ -596,10 +602,10 @@ def main():
         Input("overlay-options", "value"),
         Input("team-filter", "value"),
         Input("mode-selector", "value"),
+        Input("edits-store", "data"),          # now an Input so drags re-render the figure
         State("timestamps", "data"),
-        State("edits-store", "data"),
     )
-    def update_figure(time_index: int, overlay_values, team_filter, mode, ts_list, edits_store):
+    def update_figure(time_index: int, overlay_values, team_filter, mode, edits_store, ts_list):
         current_timestamp = ts_list[time_index]
         ts_key = str(current_timestamp)
 
@@ -632,15 +638,18 @@ def main():
         if mode == "editor" and ("players" in (overlay_values or [])):
             cfg = {
                 "responsive": True,
+                "displayModeBar": True,
                 "editable": True,
                 "edits": {
-                    "shapePosition": True,
-                    "annotationPosition": False,
-                    "annotationText": False
+                    "shapePosition": True,     # move/resize allowed by Plotly; we snap size back on re-render
+                    "titleText": False,
+                    "axisTitleText": False,
+                    "annotationText": False,
+                    "legendPosition": False
                 }
             }
         else:
-            cfg = {"responsive": True, "editable": False}
+            cfg = {"responsive": True, "displayModeBar": True, "editable": False}
 
         return fig, shape_map, cfg
 
@@ -664,14 +673,13 @@ def main():
         if not shape_map:
             raise dash.exceptions.PreventUpdate
 
-        # Group updates per shape index
-        per_idx = {}
+        # Collect bbox edits for each shape index
+        per_idx: Dict[int, Dict[str, float]] = {}
         for k, v in relayout.items():
             if not (k.startswith("shapes[") and "]" in k):
                 continue
             try:
-                idx_str = k.split("[", 1)[1].split("]", 1)[0]
-                idx = int(idx_str)
+                idx = int(k.split("[", 1)[1].split("]", 1)[0])
             except Exception:
                 continue
             per_idx.setdefault(idx, {})
@@ -691,16 +699,17 @@ def main():
         ts_key = str(ts_list[cur_idx])
         edits_store.setdefault(ts_key, {})
 
+        # Convert bbox to center; ignore any size changes (fixed PLAYER_RADIUS on re-render)
         for idx, bbox in per_idx.items():
             if idx < 0 or idx >= len(shape_map):
                 continue
             if not all(k in bbox for k in ("x0", "x1", "y0", "y1")):
                 continue
-            x = (bbox["x0"] + bbox["x1"]) / 2.0
-            y = (bbox["y0"] + bbox["y1"]) / 2.0
+            cx = (bbox["x0"] + bbox["x1"]) / 2.0
+            cy = (bbox["y0"] + bbox["y1"]) / 2.0
             key = shape_map[idx]             # "Team|player_id"
             team = key.split("|", 1)[0]
-            edits_store[ts_key][key] = {"x": float(x), "y": float(y), "team": team}
+            edits_store[ts_key][key] = {"x": float(cx), "y": float(cy), "team": team}
 
         return edits_store
 
