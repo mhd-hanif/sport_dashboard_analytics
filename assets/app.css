@@ -21,7 +21,7 @@
 .sb-video { background: #000; }
 .sb-placeholder { display: flex; align-items: center; justify-content: center; color: #6b7280; background: #fafafa; border: 1px dashed #e5e7eb; }
 
-/* ---------- Bottom panels ---------- */
+/* ---------- Bottom panel ---------- */
 .sb-bottom { margin-top: 4px; }
 .sb-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 8px 20px rgba(0,0,0,0.06); padding: 14px; margin: 16px 0; }
 .sb-card { background: transparent; border-radius: 12px; padding: 8px 10px; }
@@ -50,6 +50,7 @@
   box-shadow: 0 1px 0 rgba(0,0,0,0.03); cursor: pointer;
 }
 .sb-btn:hover { border-color: #b6c2cf; }
+.sb-btn[disabled] { opacity: 0.55; cursor: not-allowed; }
 .sb-speed .Select-control, .sb-speed .Select__control { border-radius: 10px; }
 .sb-chip-toggle label {
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px;
@@ -72,7 +73,7 @@
 .sb-row--wrap { flex-wrap: wrap; }
 .sb-label { font-weight: 600; color: #111827; min-width: 140px; }
 
-/* Segmented radio (team filter) */
+/* Segmented radio (used for Mode + Team filter) */
 .sb-segment label { display: inline-flex; align-items: center; padding: 6px 12px; border: 1px solid #cbd5e1; margin-right: -1px; cursor: pointer; user-select: none; background: #fff; color: #334155; }
 .sb-segment label:first-child { border-top-left-radius: 9999px; border-bottom-left-radius: 9999px; }
 .sb-segment label:last-child  { border-top-right-radius: 9999px; border-bottom-right-radius: 9999px; }

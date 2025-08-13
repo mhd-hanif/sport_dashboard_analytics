@@ -3,19 +3,26 @@ Sunbears Sports Analytics Dashboard (Dash)
 
 - Loads hockey tracking from two CSVs (Defense/Offense)
 - Top row: Digital Tracking (Plotly) + Video in proportional, rounded cards
-- Bottom tabs:
-  • Analysis Playback: centered control bar + single scrubber + frame readout
-  • Editor / Overlays: segmented team filter + chip overlays (incl. Coverage Control - soon)
+- Unified bottom panel:
+  • Mode selector (Playback Mode | Editor Mode) — exactly one selected, default = Playback
+  • Playback controls (Prev / Play-Pause / Next / Speed / Loop) centered + frame readout (right)
+  • Single scrubber slider for the full sequence
+  • Editor controls (team filter + overlay chips + Reset)
+- Editor Mode:
+  • Playback auto-pauses
+  • Players become draggable circles; moving them updates positions for the current frame
+  • Voronoi recomputes instantly from edited positions
 """
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
-import pandas as pd
 import dash
 from dash import html, dcc, Dash
 from dash.dependencies import Input, Output, State
+import dash.exceptions
+import pandas as pd
 import plotly.graph_objs as go
 
 from utils import compute_voronoi  # Voronoi + clipping
@@ -38,9 +45,14 @@ RINK_BOUNDS: Dict[str, float] = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_m
 # Default trail length used if "Trails" overlay is enabled (no UI control now)
 TRAIL_DEFAULT = 40
 
+# Player circle radius for Editor Mode (rink-units)
+PLAYER_RADIUS = 0.7
+
 STYLES: Dict[str, Any] = {
     "page": {"background": "#f6f7fb", "fontFamily": "Inter, Segoe UI, Arial, sans-serif"},
 }
+
+COLOR_MAP = {"Offense": "#e74c3c", "Defense": "#2e86de"}
 
 
 # --------------------------------------------------------------------------------------
@@ -87,7 +99,7 @@ def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------------------
-# Figure builders
+# Utilities
 # --------------------------------------------------------------------------------------
 
 def _clamp_df(df_: Optional[pd.DataFrame], bounds: Dict[str, float]) -> Optional[pd.DataFrame]:
@@ -99,16 +111,74 @@ def _clamp_df(df_: Optional[pd.DataFrame], bounds: Dict[str, float]) -> Optional
     return df_
 
 
+def make_trails(df: pd.DataFrame, current_ts: int, trail_len: int) -> pd.DataFrame:
+    start_ts = max(df["timestamp"].min(), current_ts - trail_len)
+    return df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= current_ts)].copy()
+
+
+def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
+    w = bounds["x_max"] - bounds["x_min"]
+    h = bounds["y_max"] - bounds["y_min"]
+    pct = (h / w) * 100.0 if w > 0 else 56.25
+    return f"{pct:.3f}%"
+
+
+def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
+    if not edits_for_ts:
+        return df_frame
+    df_frame = df_frame.copy()
+    df_frame["__key"] = df_frame["team"].astype(str) + "|" + df_frame["player_id"].astype(str)
+    for key, info in edits_for_ts.items():
+        if key in set(df_frame["__key"]) and "x" in info and "y" in info:
+            df_frame.loc[df_frame["__key"] == key, ["x", "y"]] = [info["x"], info["y"]]
+    df_frame.drop(columns="__key", inplace=True)
+    return df_frame
+
+
+def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any]) -> pd.DataFrame:
+    if not isinstance(edits_store, dict) or trails_df.empty:
+        return trails_df
+    trails_df = trails_df.copy()
+    trails_df["__key"] = trails_df["team"].astype(str) + "|" + trails_df["player_id"].astype(str)
+    edited_ts = set(edits_store.keys())
+    if not edited_ts:
+        trails_df.drop(columns="__key", inplace=True)
+        return trails_df
+    mask = trails_df["timestamp"].astype(str).isin(edited_ts)
+    idx = trails_df.index[mask]
+    for i in idx:
+        ts_key = str(trails_df.at[i, "timestamp"])
+        pkey = trails_df.at[i, "__key"]
+        if pkey in edits_store.get(ts_key, {}):
+            info = edits_store[ts_key][pkey]
+            trails_df.at[i, "x"] = float(info["x"])
+            trails_df.at[i, "y"] = float(info["y"])
+    trails_df.drop(columns="__key", inplace=True)
+    return trails_df
+
+
+# --------------------------------------------------------------------------------------
+# Figure builder
+# --------------------------------------------------------------------------------------
+
 def build_tracking_figure(
     df_frame: pd.DataFrame,
+    trails_df: Optional[pd.DataFrame],
     bounds: Dict[str, float],
     team_filter: str,
     show_players: bool,
     show_voronoi: bool,
     show_trails: bool,
-    trails_df: Optional[pd.DataFrame],
-) -> go.Figure:
+    mode: str,
+    edits_enabled: bool,
+) -> Tuple[go.Figure, List[str]]:
+    """
+    Returns (figure, shape_index_map).
+    - In Playback mode: players are scatter markers (not draggable), shape_index_map = []
+    - In Editor mode with players visible: players are draggable circle shapes; shape_index_map maps index -> "Team|player_id"
+    """
     data: List[go.Scatter] = []
+    shape_index_map: List[str] = []
 
     df_frame = _clamp_df(df_frame, bounds)
     trails_df = _clamp_df(trails_df, bounds)
@@ -128,21 +198,6 @@ def build_tracking_figure(
                     x=seg["x"], y=seg["y"], mode="lines",
                     line=dict(width=2), opacity=0.35,
                     hoverinfo="skip", showlegend=False,
-                )
-            )
-
-    # players
-    if show_players and not df_frame.empty:
-        color_map = {"Offense": "#e74c3c", "Defense": "#2e86de"}
-        for team in ["Offense", "Defense"]:
-            sub = df_frame[df_frame["team"] == team]
-            if sub.empty:
-                continue
-            data.append(
-                go.Scatter(
-                    x=sub["x"], y=sub["y"], mode="markers+text",
-                    marker=dict(size=12, color=color_map[team], line=dict(width=1, color="white")),
-                    text=sub["player_id"], textposition="middle center", name=team,
                 )
             )
 
@@ -187,24 +242,60 @@ def build_tracking_figure(
         hovermode="closest",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    return fig
 
+    # players: markers (playback) OR draggable shapes (editor)
+    if show_players and not df_frame.empty:
+        if mode == "editor" and edits_enabled:
+            shapes = []
+            annotations = []
+            for team in ["Offense", "Defense"]:
+                sub = df_frame[df_frame["team"] == team].copy()
+                if sub.empty:
+                    continue
+                sub = sub.sort_values(["player_id"], kind="mergesort")
+                for _, row in sub.iterrows():
+                    x, y = float(row["x"]), float(row["y"])
+                    pid = str(row["player_id"])
+                    key = f"{team}|{pid}"
+                    shape_index_map.append(key)
+                    shapes.append(
+                        dict(
+                            type="circle",
+                            xref="x", yref="y",
+                            x0=x - PLAYER_RADIUS, x1=x + PLAYER_RADIUS,
+                            y0=y - PLAYER_RADIUS, y1=y + PLAYER_RADIUS,
+                            fillcolor=COLOR_MAP[team],
+                            opacity=0.95,
+                            line=dict(color="white", width=1),
+                        )
+                    )
+                    annotations.append(
+                        dict(
+                            x=x, y=y, xref="x", yref="y",
+                            text=pid, showarrow=False,
+                            font=dict(color="white", size=12, family="Inter, Arial"),
+                        )
+                    )
+            fig.update_layout(shapes=shapes, annotations=annotations)
+        else:
+            for team in ["Offense", "Defense"]:
+                sub = df_frame[df_frame["team"] == team]
+                if sub.empty:
+                    continue
+                fig.add_trace(
+                    go.Scatter(
+                        x=sub["x"], y=sub["y"], mode="markers+text",
+                        marker=dict(size=12, color=COLOR_MAP[team], line=dict(width=1, color="white")),
+                        text=sub["player_id"], textposition="middle center", name=team,
+                    )
+                )
 
-def make_trails(df: pd.DataFrame, current_ts: int, trail_len: int) -> pd.DataFrame:
-    start_ts = max(df["timestamp"].min(), current_ts - trail_len)
-    return df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= current_ts)]
+    return fig, shape_index_map
 
 
 # --------------------------------------------------------------------------------------
 # UI builders
 # --------------------------------------------------------------------------------------
-
-def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
-    w = bounds["x_max"] - bounds["x_min"]
-    h = bounds["y_max"] - bounds["y_min"]
-    pct = (h / w) * 100.0 if w > 0 else 56.25
-    return f"{pct:.3f}%"
-
 
 def build_header() -> html.Div:
     return html.Div(
@@ -254,121 +345,118 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
 
     return html.Div(
         [
-            dcc.Tabs(
-                id="bottom-tabs", value="playback",
-                children=[
-                    dcc.Tab(
-                        label="Analysis Playback", value="playback",
-                        selected_style={"borderTop": "2px solid #2563eb", "fontWeight": 600},
-                        children=[
-                            html.Div(
-                                [
-                                    # Centered control bar with right-aligned readout
-                                    html.Div(
-                                        [
-                                            html.Div(className="sb-controls-spacer"),  # left empty cell
-                                            html.Div(
-                                                [
-                                                    html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
-                                                    html.Button("▶ Play", id="btn-play", n_clicks=0, className="sb-btn"),
-                                                    html.Button("Next ⏭", id="btn-next", n_clicks=0, className="sb-btn"),
-                                                    dcc.Dropdown(
-                                                        id="speed-dropdown",
-                                                        options=[
-                                                            {"label": "0.5×", "value": 2},
-                                                            {"label": "1.0×", "value": 1},
-                                                            {"label": "2.0×", "value": 0.5},
-                                                            {"label": "4.0×", "value": 0.25},
-                                                        ],
-                                                        value=1,
-                                                        clearable=False,
-                                                        className="sb-speed",
-                                                        style={"width": "120px"},
-                                                    ),
-                                                    dcc.Checklist(
-                                                        id="loop-toggle",
-                                                        options=[{"label": "Loop", "value": "loop"}],
-                                                        value=[],
-                                                        className="sb-chip-toggle",
-                                                    ),
-                                                ],
-                                                className="sb-ctlbar",  # the pill container
-                                            ),
-                                            html.Div(id="frame-readout", className="sb-readout"),
-                                        ],
-                                        className="sb-controls-grid",
-                                    ),
-
-                                    # Single scrubber
-                                    html.Div(
-                                        dcc.Slider(
-                                            id="time-slider-main",
-                                            min=start, max=end, value=start, step=1,
-                                            tooltip={"always_visible": False, "placement": "bottom"},
-                                            updatemode="drag",
-                                            className="sb-timeline",
-                                        ),
-                                        className="sb-card sb-card--padded",
-                                    ),
-                                ],
-                                className="sb-panel",
-                            )
+            html.Div(
+                [
+                    html.Div("Mode:", className="sb-label"),
+                    dcc.RadioItems(
+                        id="mode-selector",
+                        options=[
+                            {"label": "Playback Mode", "value": "playback"},
+                            {"label": "Editor Mode", "value": "editor"},
                         ],
-                    ),
-                    dcc.Tab(
-                        label="Editor / Overlays", value="editor",
-                        selected_style={"borderTop": "2px solid #2563eb", "fontWeight": 600},
-                        children=[
-                            html.Div(
-                                [
-                                    # Team filter segmented
-                                    html.Div(
-                                        [
-                                            html.Div("Show team:", className="sb-label"),
-                                            dcc.RadioItems(
-                                                id="team-filter",
-                                                options=[
-                                                    {"label": "Both", "value": "both"},
-                                                    {"label": "Offense", "value": "offense"},
-                                                    {"label": "Defense", "value": "defense"},
-                                                ],
-                                                value="both",
-                                                inline=True,
-                                                className="sb-segment",
-                                            ),
-                                        ],
-                                        className="sb-row",
-                                    ),
-
-                                    # Overlay chips (with extra "Coverage Control (soon)")
-                                    html.Div(
-                                        [
-                                            html.Div("Overlays:", className="sb-label"),
-                                            dcc.Checklist(
-                                                id="overlay-options",
-                                                options=[
-                                                    {"label": "Show Players", "value": "players"},
-                                                    {"label": "Show Trails", "value": "trails"},
-                                                    {"label": "Show Voronoi", "value": "voronoi"},
-                                                    {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
-                                                    {"label": "Pitch Control (soon)", "value": "pc", "disabled": True},
-                                                    {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
-                                                ],
-                                                value=["players", "voronoi"],
-                                                inline=True,
-                                                className="sb-chips",
-                                            ),
-                                            html.Button("Reset", id="btn-reset-editor", n_clicks=0, className="sb-link"),
-                                        ],
-                                        className="sb-row sb-row--wrap",
-                                    ),
-                                ],
-                                className="sb-panel",
-                            )
-                        ],
+                        value="playback",
+                        inline=True,
+                        className="sb-segment",
                     ),
                 ],
-            )
+                className="sb-row",
+            ),
+
+            # Centered control bar with right-aligned readout
+            html.Div(
+                [
+                    html.Div(className="sb-controls-spacer"),
+                    html.Div(
+                        [
+                            html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
+                            html.Button("▶ Play", id="btn-play", n_clicks=0, className="sb-btn", disabled=False),
+                            html.Button("Next ⏭", id="btn-next", n_clicks=0, className="sb-btn"),
+                            dcc.Dropdown(
+                                id="speed-dropdown",
+                                options=[
+                                    {"label": "0.5×", "value": 2},
+                                    {"label": "1.0×", "value": 1},
+                                    {"label": "2.0×", "value": 0.5},
+                                    {"label": "4.0×", "value": 0.25},
+                                ],
+                                value=1,
+                                clearable=False,
+                                className="sb-speed",
+                                style={"width": "120px"},
+                            ),
+                            dcc.Checklist(
+                                id="loop-toggle",
+                                options=[{"label": "Loop", "value": "loop"}],
+                                value=[],
+                                className="sb-chip-toggle",
+                            ),
+                        ],
+                        className="sb-ctlbar",
+                    ),
+                    html.Div(id="frame-readout", className="sb-readout"),
+                ],
+                className="sb-controls-grid",
+            ),
+
+            # Single scrubber
+            html.Div(
+                dcc.Slider(
+                    id="time-slider-main",
+                    min=start, max=end, value=start, step=1,
+                    tooltip={"always_visible": False, "placement": "bottom"},
+                    updatemode="drag",
+                    className="sb-timeline",
+                ),
+                className="sb-card sb-card--padded",
+            ),
+
+            # Editor/Overlay controls (always visible, used in both modes)
+            html.Div(
+                [
+                    # Team filter segmented
+                    html.Div(
+                        [
+                            html.Div("Show team:", className="sb-label"),
+                            dcc.RadioItems(
+                                id="team-filter",
+                                options=[
+                                    {"label": "Both", "value": "both"},
+                                    {"label": "Offense", "value": "offense"},
+                                    {"label": "Defense", "value": "defense"},
+                                ],
+                                value="both",
+                                inline=True,
+                                className="sb-segment",
+                            ),
+                        ],
+                        className="sb-row",
+                    ),
+
+                    # Overlay chips (with extras disabled)
+                    html.Div(
+                        [
+                            html.Div("Overlays:", className="sb-label"),
+                            dcc.Checklist(
+                                id="overlay-options",
+                                options=[
+                                    {"label": "Show Players", "value": "players"},
+                                    {"label": "Show Trails", "value": "trails"},
+                                    {"label": "Show Voronoi", "value": "voronoi"},
+                                    {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
+                                    {"label": "Pitch Control (soon)", "value": "pc", "disabled": True},
+                                    {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
+                                ],
+                                value=["players", "voronoi"],
+                                inline=True,
+                                className="sb-chips",
+                            ),
+                            html.Button("Reset", id="btn-reset-editor", n_clicks=0, className="sb-link"),
+                        ],
+                        className="sb-row sb-row--wrap",
+                    ),
+                ],
+                className="sb-panel",
+            ),
         ],
         className="sb-bottom",
     )
@@ -399,6 +487,8 @@ def main():
             dcc.Interval(id="play-interval", interval=100, disabled=True),
             dcc.Store(id="is-playing", data=False),
             dcc.Store(id="timestamps", data=timestamps),
+            dcc.Store(id="edits-store", data={}),          # { "ts": { "Team|player": {"x":..,"y":..,"team":..} } }
+            dcc.Store(id="shape-index-map", data=[]),      # ["Team|player", ...] aligned with layout.shapes order
         ],
         className="sb-page",
         style=STYLES["page"],
@@ -409,7 +499,12 @@ def main():
     def set_speed(mult):
         return int(100 * mult)  # base 100 ms
 
-    # Playback driver: single source of truth for play/pause/prev/next/loop/end-stop
+    # Disable Play button in Editor Mode (to avoid conflicts)
+    @app.callback(Output("btn-play", "disabled"), Input("mode-selector", "value"))
+    def toggle_play_disabled(mode):
+        return mode == "editor"
+
+    # Playback driver: unified source of truth (+ auto-pause when switching to Editor)
     @app.callback(
         Output("time-slider-main", "value"),
         Output("is-playing", "data"),
@@ -419,13 +514,14 @@ def main():
         Input("btn-prev", "n_clicks"),
         Input("btn-next", "n_clicks"),
         Input("btn-play", "n_clicks"),
+        Input("mode-selector", "value"),
         State("loop-toggle", "value"),
         State("time-slider-main", "value"),
         State("timestamps", "data"),
         State("is-playing", "data"),
         prevent_initial_call=True,
     )
-    def playback_driver(_tick, _prev, _next, _play_clicks,
+    def playback_driver(_tick, _prev, _next, _play_clicks, mode,
                         loop_vals, cur_idx, ts_list, is_playing):
         ctx = dash.callback_context
         if not ctx.triggered:
@@ -439,11 +535,14 @@ def main():
         def label(paused: bool) -> str:
             return "⏸ Pause" if paused else "▶ Play"
 
-        # Play/Pause button toggled
+        # Mode switched -> enforce pause
+        if trigger == "mode-selector":
+            return cur_idx, False, True, "▶ Play"
+
+        # Play/Pause button toggled (only in playback; button disabled in editor)
         if trigger == "btn-play":
             new_playing = not bool(is_playing)
             new_idx = cur_idx
-            # if starting from end, restart at beginning
             if new_playing and cur_idx >= last:
                 new_idx = 0
             return new_idx, new_playing, (not new_playing), label(new_playing)
@@ -466,14 +565,14 @@ def main():
 
         # Timer tick during playback
         if trigger == "play-interval":
-            if not is_playing:
+            if not is_playing or mode == "editor":
                 raise dash.exceptions.PreventUpdate
             nxt = cur_idx + 1
             if nxt > last:
                 if loop:
-                    return 0, True, False, "⏸ Pause"  # wrap & keep playing
+                    return 0, True, False, "⏸ Pause"
                 else:
-                    return last, False, True, "▶ Play"  # stop at end, show Play
+                    return last, False, True, "▶ Play"
             return nxt, True, False, "⏸ Pause"
 
         raise dash.exceptions.PreventUpdate
@@ -483,30 +582,122 @@ def main():
     def update_readout(idx, ts_list):
         return f"Frame {idx} / {len(ts_list) - 1}"
 
-    # Graph update
+    # Graph update (figure + shape-index map + graph config)
     @app.callback(
         Output("tracking-graph", "figure"),
+        Output("shape-index-map", "data"),
+        Output("tracking-graph", "config"),
         Input("time-slider-main", "value"),
         Input("overlay-options", "value"),
         Input("team-filter", "value"),
+        Input("mode-selector", "value"),
+        State("timestamps", "data"),
+        State("edits-store", "data"),
     )
-    def update_figure(time_index: int, overlay_values, team_filter):
-        current_timestamp = timestamps[time_index]
-        df_frame = df[df["timestamp"] == current_timestamp]
-        show_players = "players" in overlay_values
-        show_voronoi = "voronoi" in overlay_values
-        show_trails = "trails" in overlay_values
-        trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
+    def update_figure(time_index: int, overlay_values, team_filter, mode, ts_list, edits_store):
+        current_timestamp = ts_list[time_index]
+        ts_key = str(current_timestamp)
 
-        return build_tracking_figure(
+        # Current frame data
+        df_frame = df[df["timestamp"] == current_timestamp].copy()
+
+        # Apply per-frame edits to the frame (if any)
+        edits_for_ts = (edits_store or {}).get(ts_key, {})
+        df_frame = _apply_edits_to_frame(df_frame, edits_for_ts)
+
+        # Prepare trails (and optionally apply edits for visual consistency)
+        show_trails = "trails" in (overlay_values or [])
+        trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
+        if trails_df is not None:
+            trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
+
+        fig, shape_map = build_tracking_figure(
             df_frame=df_frame,
+            trails_df=trails_df,
             bounds=RINK_BOUNDS,
             team_filter=team_filter,
-            show_players=show_players,
-            show_voronoi=show_voronoi,
+            show_players=("players" in (overlay_values or [])),
+            show_voronoi=("voronoi" in (overlay_values or [])),
             show_trails=show_trails,
-            trails_df=trails_df,
+            mode=mode,
+            edits_enabled=True,
         )
+
+        # Graph config: enable shape dragging ONLY in editor mode with players visible
+        if mode == "editor" and ("players" in (overlay_values or [])):
+            cfg = {
+                "responsive": True,
+                "editable": True,
+                "edits": {
+                    "shapePosition": True,
+                    "annotationPosition": False,
+                    "annotationText": False
+                }
+            }
+        else:
+            cfg = {"responsive": True, "editable": False}
+
+        return fig, shape_map, cfg
+
+    # Capture draggable shape moves in Editor Mode -> update edits-store
+    @app.callback(
+        Output("edits-store", "data"),
+        Input("tracking-graph", "relayoutData"),
+        State("mode-selector", "value"),
+        State("overlay-options", "value"),
+        State("shape-index-map", "data"),
+        State("time-slider-main", "value"),
+        State("timestamps", "data"),
+        State("edits-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_shape_drag(relayout, mode, overlays, shape_map, cur_idx, ts_list, edits_store):
+        if mode != "editor" or "players" not in (overlays or []):
+            raise dash.exceptions.PreventUpdate
+        if not relayout or not isinstance(relayout, dict):
+            raise dash.exceptions.PreventUpdate
+        if not shape_map:
+            raise dash.exceptions.PreventUpdate
+
+        # Group updates per shape index
+        per_idx = {}
+        for k, v in relayout.items():
+            if not (k.startswith("shapes[") and "]" in k):
+                continue
+            try:
+                idx_str = k.split("[", 1)[1].split("]", 1)[0]
+                idx = int(idx_str)
+            except Exception:
+                continue
+            per_idx.setdefault(idx, {})
+            if k.endswith(".x0"):
+                per_idx[idx]["x0"] = float(v)
+            elif k.endswith(".x1"):
+                per_idx[idx]["x1"] = float(v)
+            elif k.endswith(".y0"):
+                per_idx[idx]["y0"] = float(v)
+            elif k.endswith(".y1"):
+                per_idx[idx]["y1"] = float(v)
+
+        if not per_idx:
+            raise dash.exceptions.PreventUpdate
+
+        edits_store = edits_store or {}
+        ts_key = str(ts_list[cur_idx])
+        edits_store.setdefault(ts_key, {})
+
+        for idx, bbox in per_idx.items():
+            if idx < 0 or idx >= len(shape_map):
+                continue
+            if not all(k in bbox for k in ("x0", "x1", "y0", "y1")):
+                continue
+            x = (bbox["x0"] + bbox["x1"]) / 2.0
+            y = (bbox["y0"] + bbox["y1"]) / 2.0
+            key = shape_map[idx]             # "Team|player_id"
+            team = key.split("|", 1)[0]
+            edits_store[ts_key][key] = {"x": float(x), "y": float(y), "team": team}
+
+        return edits_store
 
     # Reset editor to defaults
     @app.callback(
