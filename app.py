@@ -53,6 +53,12 @@ STYLES: Dict[str, Any] = {
 
 COLOR_MAP = {"Offense": "#e74c3c", "Defense": "#2e86de"}
 
+# Voronoi fill colors (light, slightly transparent)
+VORONOI_FILL = {
+    "Defense": "rgba(223,233,249,0.55)",  # #dfe9f9 @ 55% alpha
+    "Offense": "rgba(248,223,220,0.55)",  # #f8dfdc @ 55% alpha
+}
+
 
 # --------------------------------------------------------------------------------------
 # Data loading
@@ -130,7 +136,7 @@ def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[s
     for key, info in edits_for_ts.items():
         if key in set(df_frame["__key"]) and "x" in info and "y" in info:
             df_frame.loc[df_frame["__key"] == key, ["x", "y"]] = [info["x"], info["y"]]
-    df_frame.drop(columns=".__key".replace(".", ""), inplace=True)  # drop __key
+    df_frame.drop(columns="__key", inplace=True)
     return df_frame
 
 
@@ -200,22 +206,21 @@ def build_tracking_figure(
                 )
             )
 
-    # voronoi
+    # voronoi (team-colored, slightly transparent)
     if show_voronoi and len(df_frame) >= 2:
         positions = df_frame[["x", "y"]].values.tolist()
+        pos_teams = df_frame["team"].tolist()  # align with positions order
         vor = compute_voronoi(positions, bounds)
-        palette = [
-            "rgba(231, 76, 60, 0.18)","rgba(46, 134, 222, 0.18)","rgba(39, 174, 96, 0.18)",
-            "rgba(241, 196, 15, 0.18)","rgba(155, 89, 182, 0.18)","rgba(26, 188, 156, 0.18)",
-        ]
         for idx, poly in vor.items():
             if not poly:
                 continue
             xs, ys = zip(*poly)
             xs, ys = list(xs) + [xs[0]], list(ys) + [ys[0]]
+            team = pos_teams[idx] if idx < len(pos_teams) else "Offense"
+            fill = VORONOI_FILL.get(team, VORONOI_FILL["Offense"])
             data.append(
                 go.Scatter(
-                    x=xs, y=ys, fill="toself", fillcolor=palette[idx % len(palette)],
+                    x=xs, y=ys, fill="toself", fillcolor=fill,
                     line=dict(color="rgba(0,0,0,0.12)", width=1), hoverinfo="skip", showlegend=False,
                 )
             )
