@@ -7,11 +7,11 @@ Sunbears Sports Analytics Dashboard (Dash)
   • Centered toolbar: [Mode selector] | Prev / Play / Next / Speed / Loop + frame readout (right)
   • Single scrubber slider
   • Editor controls (team filter + overlay chips + Reset)
-- Editor Mode:
+- Editor Mode (ephemeral edits):
   • Playback auto-pauses, Play button disabled
-  • Players become draggable circles (move-only visual effect; size stays fixed)
-  • Jersey numbers move with players
+  • Drag players by moving the circle (move-only; fixed radius). Jersey numbers follow automatically.
   • Voronoi recomputes instantly from edited positions
+  • Changing frame OR switching modes clears edits; returning to a frame shows original data
 """
 
 from __future__ import annotations
@@ -546,7 +546,7 @@ def main():
         def label(paused: bool) -> str:
             return "⏸ Pause" if paused else "▶ Play"
 
-        # Mode switched -> enforce pause
+        # Mode switched -> enforce pause (clear happens in edits-manager)
         if trigger == "mode-selector":
             return cur_idx, False, True, "▶ Play"
 
@@ -612,14 +612,14 @@ def main():
         # Current frame data
         df_frame = df[df["timestamp"] == current_timestamp].copy()
 
-        # Apply per-frame edits to the frame (if any)
-        edits_for_ts = (edits_store or {}).get(ts_key, {})
+        # Apply per-frame edits to the frame (ONLY IN EDITOR MODE)
+        edits_for_ts = (edits_store or {}).get(ts_key, {}) if mode == "editor" else {}
         df_frame = _apply_edits_to_frame(df_frame, edits_for_ts)
 
-        # Prepare trails (and optionally apply edits for visual consistency)
+        # Prepare trails (apply edits to trails only in editor for visual consistency)
         show_trails = "trails" in (overlay_values or [])
         trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
-        if trails_df is not None:
+        if trails_df is not None and mode == "editor":
             trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
 
         fig, shape_map = build_tracking_figure(
@@ -641,10 +641,11 @@ def main():
                 "displayModeBar": True,
                 "editable": True,
                 "edits": {
-                    "shapePosition": True,     # move/resize allowed by Plotly; we snap size back on re-render
+                    "shapePosition": True,     # move allowed; we snap size back on re-render
+                    "annotationPosition": False,
+                    "annotationText": False,
                     "titleText": False,
                     "axisTitleText": False,
-                    "annotationText": False,
                     "legendPosition": False
                 }
             }
@@ -653,24 +654,36 @@ def main():
 
         return fig, shape_map, cfg
 
-    # Capture draggable shape moves in Editor Mode -> update edits-store
+    # Edits manager:
+    # - Clear ALL edits on frame change OR mode change (ephemeral edits by design)
+    # - Update edits on shape drag using centers; ignore size changes
     @app.callback(
         Output("edits-store", "data"),
         Input("tracking-graph", "relayoutData"),
-        State("mode-selector", "value"),
+        Input("time-slider-main", "value"),
+        Input("mode-selector", "value"),
         State("overlay-options", "value"),
         State("shape-index-map", "data"),
-        State("time-slider-main", "value"),
         State("timestamps", "data"),
         State("edits-store", "data"),
         prevent_initial_call=True,
     )
-    def on_shape_drag(relayout, mode, overlays, shape_map, cur_idx, ts_list, edits_store):
+    def edits_manager(relayout, time_idx, mode, overlays, shape_map, ts_list, edits_store):
+        ctx = dash.callback_context
+        if not ctx.triggered:
+            raise dash.exceptions.PreventUpdate
+        trigger = ctx.triggered[0]["prop_id"].split(".")[0]
+
+        # Clear edits whenever time frame changes OR mode changes (either way)
+        if trigger == "time-slider-main" or trigger == "mode-selector":
+            return {}
+
+        # If not editor or players overlay off, ignore
         if mode != "editor" or "players" not in (overlays or []):
             raise dash.exceptions.PreventUpdate
-        if not relayout or not isinstance(relayout, dict):
-            raise dash.exceptions.PreventUpdate
-        if not shape_map:
+
+        # Process drag events
+        if not relayout or not isinstance(relayout, dict) or not shape_map:
             raise dash.exceptions.PreventUpdate
 
         # Collect bbox edits for each shape index
@@ -696,7 +709,7 @@ def main():
             raise dash.exceptions.PreventUpdate
 
         edits_store = edits_store or {}
-        ts_key = str(ts_list[cur_idx])
+        ts_key = str(ts_list[time_idx])
         edits_store.setdefault(ts_key, {})
 
         # Convert bbox to center; ignore any size changes (fixed PLAYER_RADIUS on re-render)
