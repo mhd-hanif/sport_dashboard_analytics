@@ -3,13 +3,12 @@ Sunbears Sports Analytics Dashboard (Dash)
 
 - Loads hockey tracking from two CSVs (Defense/Offense)
 - Top row: Digital Tracking (Plotly) + Video in proportional, rounded cards
-- Unified bottom panel:
-  • Mode selector (Playback Mode | Editor Mode) — exactly one selected, default = Playback
-  • Playback controls (Prev / Play-Pause / Next / Speed / Loop) centered + frame readout (right)
-  • Single scrubber slider for the full sequence
+- Unified bottom "suite" (single rounded container):
+  • Centered toolbar: [Mode selector] | Prev / Play / Next / Speed / Loop + frame readout (right)
+  • Single scrubber slider
   • Editor controls (team filter + overlay chips + Reset)
 - Editor Mode:
-  • Playback auto-pauses
+  • Playback auto-pauses, Play button disabled
   • Players become draggable circles; moving them updates positions for the current frame
   • Voronoi recomputes instantly from edited positions
 """
@@ -131,7 +130,7 @@ def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[s
     for key, info in edits_for_ts.items():
         if key in set(df_frame["__key"]) and "x" in info and "y" in info:
             df_frame.loc[df_frame["__key"] == key, ["x", "y"]] = [info["x"], info["y"]]
-    df_frame.drop(columns="__key", inplace=True)
+    df_frame.drop(columns=".__key".replace(".", ""), inplace=True)  # drop __key
     return df_frame
 
 
@@ -345,117 +344,118 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
 
     return html.Div(
         [
+            # Single enclosed suite
             html.Div(
                 [
-                    html.Div("Mode:", className="sb-label"),
-                    dcc.RadioItems(
-                        id="mode-selector",
-                        options=[
-                            {"label": "Playback Mode", "value": "playback"},
-                            {"label": "Editor Mode", "value": "editor"},
-                        ],
-                        value="playback",
-                        inline=True,
-                        className="sb-segment",
-                    ),
-                ],
-                className="sb-row",
-            ),
-
-            # Centered control bar with right-aligned readout
-            html.Div(
-                [
-                    html.Div(className="sb-controls-spacer"),
+                    # Centered toolbar: [Mode selector] | playback controls + right readout
                     html.Div(
                         [
-                            html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
-                            html.Button("▶ Play", id="btn-play", n_clicks=0, className="sb-btn", disabled=False),
-                            html.Button("Next ⏭", id="btn-next", n_clicks=0, className="sb-btn"),
-                            dcc.Dropdown(
-                                id="speed-dropdown",
-                                options=[
-                                    {"label": "0.5×", "value": 2},
-                                    {"label": "1.0×", "value": 1},
-                                    {"label": "2.0×", "value": 0.5},
-                                    {"label": "4.0×", "value": 0.25},
+                            html.Div(className="sb-controls-spacer"),
+                            html.Div(
+                                [
+                                    dcc.RadioItems(
+                                        id="mode-selector",
+                                        options=[
+                                            {"label": "Playback Mode", "value": "playback"},
+                                            {"label": "Editor Mode", "value": "editor"},
+                                        ],
+                                        value="playback",
+                                        inline=True,
+                                        className="sb-segment sb-mode",
+                                    ),
+                                    html.Span(className="sb-ctlbar__sep"),
+                                    html.Button("⏮ Prev", id="btn-prev", n_clicks=0, className="sb-btn"),
+                                    html.Button("▶ Play", id="btn-play", n_clicks=0, className="sb-btn", disabled=False),
+                                    html.Button("Next ⏭", id="btn-next", n_clicks=0, className="sb-btn"),
+                                    dcc.Dropdown(
+                                        id="speed-dropdown",
+                                        options=[
+                                            {"label": "0.5×", "value": 2},
+                                            {"label": "1.0×", "value": 1},
+                                            {"label": "2.0×", "value": 0.5},
+                                            {"label": "4.0×", "value": 0.25},
+                                        ],
+                                        value=1,
+                                        clearable=False,
+                                        className="sb-speed",
+                                        style={"width": "120px"},
+                                    ),
+                                    dcc.Checklist(
+                                        id="loop-toggle",
+                                        options=[{"label": "Loop", "value": "loop"}],
+                                        value=[],
+                                        className="sb-chip-toggle",
+                                    ),
                                 ],
-                                value=1,
-                                clearable=False,
-                                className="sb-speed",
-                                style={"width": "120px"},
+                                className="sb-ctlbar",
                             ),
-                            dcc.Checklist(
-                                id="loop-toggle",
-                                options=[{"label": "Loop", "value": "loop"}],
-                                value=[],
-                                className="sb-chip-toggle",
-                            ),
+                            html.Div(id="frame-readout", className="sb-readout"),
                         ],
-                        className="sb-ctlbar",
+                        className="sb-controls-grid",
                     ),
-                    html.Div(id="frame-readout", className="sb-readout"),
-                ],
-                className="sb-controls-grid",
-            ),
 
-            # Single scrubber
-            html.Div(
-                dcc.Slider(
-                    id="time-slider-main",
-                    min=start, max=end, value=start, step=1,
-                    tooltip={"always_visible": False, "placement": "bottom"},
-                    updatemode="drag",
-                    className="sb-timeline",
-                ),
-                className="sb-card sb-card--padded",
-            ),
+                    html.Div(className="sb-divider"),
 
-            # Editor/Overlay controls (always visible, used in both modes)
-            html.Div(
-                [
-                    # Team filter segmented
+                    # Single scrubber
+                    html.Div(
+                        dcc.Slider(
+                            id="time-slider-main",
+                            min=start, max=end, value=start, step=1,
+                            tooltip={"always_visible": False, "placement": "bottom"},
+                            updatemode="drag",
+                            className="sb-timeline",
+                        ),
+                        className="sb-card sb-card--padded",
+                    ),
+
+                    html.Div(className="sb-divider"),
+
+                    # Editor/Overlay controls (inside the same suite)
                     html.Div(
                         [
-                            html.Div("Show team:", className="sb-label"),
-                            dcc.RadioItems(
-                                id="team-filter",
-                                options=[
-                                    {"label": "Both", "value": "both"},
-                                    {"label": "Offense", "value": "offense"},
-                                    {"label": "Defense", "value": "defense"},
+                            html.Div(
+                                [
+                                    html.Div("Show team:", className="sb-label"),
+                                    dcc.RadioItems(
+                                        id="team-filter",
+                                        options=[
+                                            {"label": "Both", "value": "both"},
+                                            {"label": "Offense", "value": "offense"},
+                                            {"label": "Defense", "value": "defense"},
+                                        ],
+                                        value="both",
+                                        inline=True,
+                                        className="sb-segment",
+                                    ),
                                 ],
-                                value="both",
-                                inline=True,
-                                className="sb-segment",
+                                className="sb-row",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Overlays:", className="sb-label"),
+                                    dcc.Checklist(
+                                        id="overlay-options",
+                                        options=[
+                                            {"label": "Show Players", "value": "players"},
+                                            {"label": "Show Trails", "value": "trails"},
+                                            {"label": "Show Voronoi", "value": "voronoi"},
+                                            {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
+                                            {"label": "Pitch Control (soon)", "value": "pc", "disabled": True},
+                                            {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
+                                        ],
+                                        value=["players", "voronoi"],
+                                        inline=True,
+                                        className="sb-chips",
+                                    ),
+                                    html.Button("Reset", id="btn-reset-editor", n_clicks=0, className="sb-link"),
+                                ],
+                                className="sb-row sb-row--wrap",
                             ),
                         ],
-                        className="sb-row",
-                    ),
-
-                    # Overlay chips (with extras disabled)
-                    html.Div(
-                        [
-                            html.Div("Overlays:", className="sb-label"),
-                            dcc.Checklist(
-                                id="overlay-options",
-                                options=[
-                                    {"label": "Show Players", "value": "players"},
-                                    {"label": "Show Trails", "value": "trails"},
-                                    {"label": "Show Voronoi", "value": "voronoi"},
-                                    {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
-                                    {"label": "Pitch Control (soon)", "value": "pc", "disabled": True},
-                                    {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
-                                ],
-                                value=["players", "voronoi"],
-                                inline=True,
-                                className="sb-chips",
-                            ),
-                            html.Button("Reset", id="btn-reset-editor", n_clicks=0, className="sb-link"),
-                        ],
-                        className="sb-row sb-row--wrap",
+                        className="sb-editor",
                     ),
                 ],
-                className="sb-panel",
+                className="sb-suite sb-panel",
             ),
         ],
         className="sb-bottom",
