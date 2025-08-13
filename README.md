@@ -1,92 +1,84 @@
-# Sports Analytics Dashboard (Python Dash Prototype)
+# Sunbears Sports Analytics Dashboard (Dash)
 
-This repository contains a very simple proof‑of‑concept for a sports analytics dashboard built
-entirely in Python using [Dash](https://dash.plotly.com/).  It is intended for quick prototyping and
-does not require any knowledge of JavaScript, HTML or CSS.  The goal of this app is to
-demonstrate how player tracking data can be visualised and interactively explored in a browser.
+Interactive hockey tracking dashboard built with **Python + Dash**.
 
-## Overview
+Displays player positions on a rink background, allows frame-by-frame playback, and supports overlays such as trails and Voronoi regions. Can also display a short synchronized video alongside the tracking plot.
 
-The dashboard loads one or more CSV files containing player tracking
-data and plots the positions of players on a hockey rink.  A slider
-allows the user to step through frames, and checkboxes toggle the
-display of player markers, trail lines and Voronoi partitions.  The
-Voronoi computation is implemented in pure Python using NumPy,
-SciPy and Shapely (see `src/utils/geometry.py`).  All static assets
-(images, videos) are served automatically from the `assets/` folder by
-Dash【37895621177989†L68-L71】.
+## Features
 
-The structure of this repository is organised into a `src/` package.  Each module has a single
-responsibility:
+- **Interactive Playback**
+  - Single timeline slider for entire sequence
+  - Centered playback controls: Prev / Play / Next / Speed / Loop
+  - Frame indicator: `Frame i / N`  
+    - Stops at last frame; Play restarts from beginning
+- **Overlays**
+  - Player markers
+  - Fixed-length trails (default length from file)
+  - Voronoi regions clipped to rink boundaries
+- **Layout**
+  - Left: Tracking visualization
+  - Right: Video player (optional)
+- **Header**
+  - Sunbears icon and title
+  - Subtitle for description
+- **Responsive design** with custom CSS styling
 
-* `config.py` stores constants such as file names and rink bounds.
-* `data_loader.py` defines functions for reading and normalising
-  tracking CSV files.
-* `figure.py` builds the Plotly figure given a frame of data.
-* `layout.py` builds the Dash layout using reusable UI components.
-* `callbacks.py` contains all Dash callbacks, separated from layout
-  definitions for clarity.
-* `utils/geometry.py` implements the Voronoi computation and polygon
-  clipping.
-* `main.py` acts as the entry point: it loads data, creates the Dash
-  app, registers the layout and callbacks, and runs the server.
+## Repository Structure
 
+- `app.py` — Main Dash application (layout, callbacks, figure rendering)
+- `utils.py` — Utility functions (Voronoi computation, polygon clipping)
+- `assets/`
+  - `app.css` — Custom styling
+  - `defensive_players_hockey.csv` — Example defense player tracking
+  - `offensive_players_hockey.csv` — Example offense player tracking
+  - `field_hockey.png` — Rink background
+  - `sunbears_icon.webp` — Dashboard icon
+  - `sample_video.mp4` — Example synchronized video (optional)
 
-## Getting Started
+## Data Format
 
-### 1. Install dependencies
+Two CSV files are expected:
 
-It is recommended to use a virtual environment when running the
-application.  From the project root run:
+- **Defensive players** — `assets/defensive_players_hockey.csv`
+- **Offensive players** — `assets/offensive_players_hockey.csv`
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+**Required columns:**
+- `timeframe` (or `timestamp`)
+- `player_id`
+- `x`
+- `y`
 
-The required packages include Dash, Plotly, Pandas, NumPy, SciPy and
-Shapely.
+The app will:
+- Map `timeframe` → `timestamp` if necessary
+- Coerce `timestamp` to `int`
+- Coerce `player_id` to `str`
+- Coerce `x` and `y` to `float`
+- Assign team labels based on the file source (Defense/Offense)
 
-### 2. Prepare your data
+## Running the App
 
-A small synthetic tracking dataset is provided in
-`data/sample_tracking.csv`.  The CSV must contain at least the columns
-`timestamp`, `player_id`, `team`, `x` and `y`【37895621177989†L55-L64】.  If you have
-your own tracking files you can replace the sample file or add
-additional CSVs – simply update the `DATA_FILES` variable in
-`src/config.py` to point to the appropriate paths.
+1. Install dependencies:
+   ```bash
+   pip install dash plotly pandas shapely scipy
+   ```
+2. Place your CSV files and optional video in the assets/ folder.
+3. Run:
+   ```bash
+   python app.py
+   ```
+4. Open the local server in your web browser
 
-### 3. Run the app
+## Notes
 
-To start the development server run:
+- The Voronoi overlay uses `scipy.spatial.Voronoi` and `shapely` for clipping to rink boundaries.
+- Styling is handled automatically by Dash loading `assets/app.css`.
+- To change team colors, update the color map in `app.py` or CSS classes in `app.css`.
 
-```bash
-python -m src.main
-```
+### Future Development
+We are actively developing advanced **spatial analysis** features for player movement, including:
 
-Dash will print a local URL (typically `http://127.0.0.1:8050`) which
-you can open in a browser.  Use the slider to move through time and
-the checkboxes and radio buttons to toggle overlays and filter by team.
+- **Coverage Control** — to evaluate and optimize spatial occupation.
+- **Pitch Control** — to assess space influence dynamically.
+- **xT (Expected Threat)** and **EPV (Expected Possession Value)** — to quantify scoring potential and decision-making impact.
 
-## Project Structure
-
-```
-sport_dashboard_analytics/
-├── README.md               # This file
-├── requirements.txt        # Python dependencies
-├── data/
-│   └── sample_tracking.csv # Example tracking data
-├── assets/
-│   └── (optional files)    # Place your images/videos here (e.g. rink image)
-└── src/
-    ├── __init__.py         # Makes src a package
-    ├── config.py           # Constants and configuration
-    ├── data_loader.py      # Data loading utilities
-    ├── figure.py           # Plotly figure builder
-    ├── layout.py           # Dash layout components
-    ├── callbacks.py        # Dash callback functions
-    └── utils/
-        ├── __init__.py
-        └── geometry.py     # Voronoi computation and clipping
-```
+_Stay tuned — coming soon!_
