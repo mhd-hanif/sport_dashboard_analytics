@@ -497,6 +497,7 @@ def main():
         raise RuntimeError("No timestamps found in tracking data.")
 
     app: Dash = dash.Dash(__name__)
+    server = app.server
     app.title = "Sunbears Dashboard"
 
     app.layout = html.Div(
