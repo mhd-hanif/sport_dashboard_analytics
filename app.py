@@ -19,6 +19,9 @@ Sync rules in this build:
 - Loop ON: both restart
 - Loop OFF: shorter stops first; longer continues; Play button shows "Pause" until BOTH stopped
 - Soft sync (no seeking)
+
+Perf additions in this build:
+- Voronoi cache: keep polygons visible while playing by reusing cached cells on skipped frames
 """
 
 from __future__ import annotations
@@ -68,7 +71,10 @@ VORONOI_FILL = {
 }
 
 # Shared timer base at 1× speed (ms)
-BASE_INTERVAL_MS = 100.0
+BASE_INTERVAL_MS = 180.0
+
+# Voronoi recompute cadence while playing (every Nth frame)
+VORONOI_RECOMPUTE_EVERY = 3
 
 
 # --------------------------------------------------------------------------------------
@@ -189,13 +195,15 @@ def build_tracking_figure(
     show_trails: bool,
     mode: str,
     edits_enabled: bool,
+    voronoi_traces_override: Optional[List[Dict[str, Any]]] = None,  # cached traces as dicts
 ) -> Tuple[go.Figure, List[str]]:
     """
     Returns (figure, shape_index_map).
     - In Playback mode: players are scatter markers (not draggable), shape_index_map = []
     - In Editor mode with players visible: players are draggable circle shapes; shape_index_map maps index -> "Team|player_id"
+    - Voronoi can be injected via voronoi_traces_override (to use cached polygons).
     """
-    data: List[go.Scatter] = []
+    data: List[go.BaseTraceType] = []
     shape_index_map: List[str] = []
 
     df_frame = _clamp_df(df_frame, bounds)
@@ -219,24 +227,32 @@ def build_tracking_figure(
                 )
             )
 
-    # voronoi (team-colored, slightly transparent)
-    if show_voronoi and len(df_frame) >= 2:
-        positions = df_frame[["x", "y"]].values.tolist()
-        pos_teams = df_frame["team"].tolist()  # align with positions order
-        vor = compute_voronoi(positions, bounds)
-        for idx, poly in vor.items():
-            if not poly:
-                continue
-            xs, ys = zip(*poly)
-            xs, ys = list(xs) + [xs[0]], list(ys) + [ys[0]]
-            team = pos_teams[idx] if idx < len(pos_teams) else "Offense"
-            fill = VORONOI_FILL.get(team, VORONOI_FILL["Offense"])
-            data.append(
-                go.Scatter(
-                    x=xs, y=ys, fill="toself", fillcolor=fill,
-                    line=dict(color="rgba(0,0,0,0.12)", width=1), hoverinfo="skip", showlegend=False,
-                )
-            )
+    # voronoi: use override (cached) or compute fresh
+    if show_voronoi:
+        if voronoi_traces_override is not None:
+            # reuse cached cells (keep Voronoi visible without recomputing)
+            for td in voronoi_traces_override:
+                data.append(go.Scatter(**td))
+        else:
+            # compute fresh
+            if len(df_frame) >= 2:
+                positions = df_frame[["x", "y"]].values.tolist()
+                pos_teams = df_frame["team"].tolist()  # align with positions order
+                vor = compute_voronoi(positions, bounds)
+                for idx, poly in vor.items():
+                    if not poly:
+                        continue
+                    xs, ys = zip(*poly)
+                    xs, ys = list(xs) + [xs[0]], list(ys) + [ys[0]]
+                    team = pos_teams[idx] if idx < len(pos_teams) else "Offense"
+                    fill = VORONOI_FILL.get(team, VORONOI_FILL["Offense"])
+                    data.append(
+                        go.Scatter(
+                            x=xs, y=ys, fill="toself", fillcolor=fill,
+                            line=dict(color="rgba(0,0,0,0.12)", width=1),
+                            hoverinfo="skip", showlegend=False,
+                        )
+                    )
 
     # base figure + rink image
     fig = go.Figure(data=data)
@@ -498,7 +514,7 @@ if not timestamps:
     raise RuntimeError("No timestamps found in tracking data.")
 
 app: Dash = dash.Dash(__name__)
-server = app.server  # <-- exported for gunicorn
+server = app.server  # exported for gunicorn
 
 app.title = "Sunbears Dashboard"
 app.layout = html.Div(
@@ -516,6 +532,9 @@ app.layout = html.Div(
         # Video sync plumbing
         dcc.Store(id="video-ctrl", data=None),         # {action:'play'|'pause', restart?:bool, token?:str}
         dcc.Store(id="video-state", data={"playing": False, "ended": False}),  # polled state
+
+        # Voronoi cache (keeps polygons visible on skipped frames)
+        dcc.Store(id="voronoi-cache", data=None),
     ],
     className="sb-page",
     style=STYLES["page"],
@@ -534,7 +553,7 @@ def set_speed(rate):
         rate = max(0.1, min(2.0, rate))
     except Exception:
         rate = 1.0
-    return int(max(20, BASE_INTERVAL_MS / rate))  # 0.5× => 200ms, 2× => 50ms
+    return int(max(20, BASE_INTERVAL_MS / rate))  # 0.5× => ~360ms, 2× => ~90ms
 
 
 # Disable Play button in Editor Mode (to avoid conflicts)
@@ -626,19 +645,23 @@ def update_readout(idx, ts_list):
     return f"Frame {idx} / {len(ts_list) - 1}"
 
 
-# Graph update (figure + shape-index map + graph config)
+# Graph update (figure + shape-index map + graph config) ------------- with Voronoi cache
 @app.callback(
     Output("tracking-graph", "figure"),
     Output("shape-index-map", "data"),
     Output("tracking-graph", "config"),
+    Output("voronoi-cache", "data"),
     Input("time-slider-main", "value"),
     Input("overlay-options", "value"),
     Input("team-filter", "value"),
     Input("mode-selector", "value"),
     Input("edits-store", "data"),
+    Input("is-playing", "data"),
     State("timestamps", "data"),
+    State("voronoi-cache", "data"),
 )
-def update_figure(time_index: int, overlay_values, team_filter, mode, edits_store, ts_list):
+def update_figure(time_index: int, overlay_values, team_filter, mode, edits_store,
+                  is_playing, ts_list, vor_cache):
     current_timestamp = ts_list[time_index]
     ts_key = str(current_timestamp)
 
@@ -655,16 +678,70 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     if trails_df is not None and mode == "editor":
         trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
 
+    # ---- Voronoi cache logic ----
+    show_voronoi = "voronoi" in (overlay_values or [])
+    voronoi_traces_override: Optional[List[Dict[str, Any]]] = None
+    new_cache = vor_cache  # default: keep
+
+    if not show_voronoi:
+        # Voronoi hidden: clear cache and don't draw
+        new_cache = None
+    else:
+        # Should we recompute?
+        need_recompute = False
+        if (vor_cache is None) or (vor_cache.get("team_filter") != team_filter):
+            need_recompute = True
+        if mode == "editor" or (not is_playing):
+            need_recompute = True
+        if is_playing and (time_index % VORONOI_RECOMPUTE_EVERY == 0):
+            need_recompute = True
+
+        if need_recompute:
+            # compute fresh traces as serializable dicts (so we can store them)
+            traces: List[Dict[str, Any]] = []
+            df_for_vor = df_frame  # already filtered & edited above
+            if len(df_for_vor) >= 2:
+                positions = df_for_vor[["x", "y"]].values.tolist()
+                pos_teams = df_for_vor["team"].tolist()
+                vor = compute_voronoi(positions, RINK_BOUNDS)
+                for idx, poly in vor.items():
+                    if not poly:
+                        continue
+                    xs, ys = zip(*poly)
+                    xs, ys = list(xs) + [xs[0]], list(ys) + [ys[0]]
+                    team = pos_teams[idx] if idx < len(pos_teams) else "Offense"
+                    fill = VORONOI_FILL.get(team, VORONOI_FILL["Offense"])
+                    traces.append({
+                        "x": xs, "y": ys,
+                        "mode": "lines",
+                        "fill": "toself",
+                        "fillcolor": fill,
+                        "line": {"color": "rgba(0,0,0,0.12)", "width": 1},
+                        "hoverinfo": "skip",
+                        "showlegend": False,
+                    })
+            new_cache = {
+                "traces": traces,
+                "team_filter": team_filter,
+                "ts": current_timestamp,
+            }
+            voronoi_traces_override = traces
+        else:
+            # use cached cells
+            if vor_cache and isinstance(vor_cache.get("traces", None), list):
+                voronoi_traces_override = vor_cache["traces"]
+
     fig, shape_map = build_tracking_figure(
         df_frame=df_frame,
         trails_df=trails_df,
         bounds=RINK_BOUNDS,
         team_filter=team_filter,
         show_players=("players" in (overlay_values or [])),
-        show_voronoi=("voronoi" in (overlay_values or [])),
+        show_voronoi=show_voronoi,
         show_trails=show_trails,
         mode=mode,
         edits_enabled=True,
+        voronoi_traces_override=voronoi_traces_override,
     )
 
     # Graph config: enable shape dragging ONLY in editor mode with players visible
@@ -685,7 +762,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     else:
         cfg = {"responsive": True, "displayModeBar": True, "editable": False}
 
-    return fig, shape_map, cfg
+    return fig, shape_map, cfg, new_cache
 
 
 # Edits manager (ephemeral)
