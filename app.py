@@ -10,7 +10,7 @@ Sunbears Sports Analytics Dashboard (Dash)
 - Editor Mode (ephemeral edits):
   • Playback auto-pauses, Play button disabled
   • Drag players by moving the circle (move-only; fixed radius). Jersey numbers follow automatically.
-  • Voronoi recomputes instantly from edited positions
+  • Voronoi & Pitch Control recompute instantly from edited positions (current frame only)
   • Changing frame OR switching modes clears edits; returning to a frame shows original data
 
 Sync rules in this build:
@@ -35,13 +35,12 @@ import plotly.graph_objs as go
 
 from utils import compute_voronoi  # Voronoi + clipping
 
+
 # --------------------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------------------
 
 # Files
-# DEFENSIVE_CSV = "assets/defensive_players_hockey.csv"
-# OFFENSIVE_CSV = "assets/offensive_players_hockey.csv"
 DEFENSIVE_CSV = "assets/defensive_players_with_velocity.csv"
 OFFENSIVE_CSV = "assets/offensive_players_with_velocity.csv"
 VIDEO_FILENAME = "sample_video.mp4"   # place under ./assets/ (optional)
@@ -66,17 +65,15 @@ VELOCITY_ARROWHEAD  = 3
 VELOCITY_ARROWSIZE = 0.5
 
 # -------- Pitch Control (beta) parameters --------
-# Small, fast grid works well on Render free tier
 PC_GRID_W = 120
 PC_GRID_H = 60
 PC_TAU_REACT = 0.40   # s
 PC_TAU_ACCEL = 0.70   # s of "speed credit"
 PC_LAMBDA = 1.6       # time decay -> sharper vs softer fields
 PC_OPACITY = 0.50     # heatmap opacity
-# v_max will be auto-calibrated from data after loading
 PC_VMAX_FALLBACK = 5.0
 PC_VMAX: float = PC_VMAX_FALLBACK
-# Cached per timestamp to avoid recomputing every tick
+# Cached per timestamp (for playback). Editor recomputes live from edited positions.
 _PC_CACHE: Dict[int, np.ndarray] = {}
 
 STYLES: Dict[str, Any] = {
@@ -100,6 +97,7 @@ PC_COLORSCALE = [
 
 # Shared timer base at 1× speed (ms)
 BASE_INTERVAL_MS = 100.0
+
 
 # --------------------------------------------------------------------------------------
 # Data loading
@@ -152,6 +150,7 @@ def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
     df.reset_index(drop=True, inplace=True)
     return df
 
+
 # --------------------------------------------------------------------------------------
 # Utilities
 # --------------------------------------------------------------------------------------
@@ -164,15 +163,18 @@ def _clamp_df(df_: Optional[pd.DataFrame], bounds: Dict[str, float]) -> Optional
     df_["y"] = df_["y"].clip(bounds["y_min"], bounds["y_max"])
     return df_
 
+
 def make_trails(df: pd.DataFrame, current_ts: int, trail_len: int) -> pd.DataFrame:
     start_ts = max(df["timestamp"].min(), current_ts - trail_len)
     return df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= current_ts)].copy()
+
 
 def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
     w = bounds["x_max"] - bounds["x_min"]
     h = bounds["y_max"] - bounds["y_min"]
     pct = (h / w) * 100.0 if w > 0 else 56.25
     return f"{pct:.3f}%"
+
 
 def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
     """Apply per-frame edited positions to a single-frame dataframe."""
@@ -186,6 +188,7 @@ def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[s
             df_frame.loc[df_frame["__key"] == key, ["x", "y"]] = [info["x"], info["y"]]
     df_frame.drop(columns="__key", inplace=True)
     return df_frame
+
 
 def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any]) -> pd.DataFrame:
     """Optionally reflect edited positions on the recent trail segment for visual continuity."""
@@ -208,6 +211,7 @@ def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any])
             trails_df.at[i, "y"] = float(info["y"])
     trails_df.drop(columns="__key", inplace=True)
     return trails_df
+
 
 def _velocity_annotations(df_frame: pd.DataFrame) -> List[Dict[str, Any]]:
     """Create Plotly annotation arrows for velocity vectors from vx, vy."""
@@ -245,6 +249,7 @@ def _velocity_annotations(df_frame: pd.DataFrame) -> List[Dict[str, Any]]:
         )
     return annots
 
+
 # -------- Pitch Control (beta): fast symmetric model --------
 
 def _auto_calibrate_vmax(df_all: pd.DataFrame) -> float:
@@ -256,6 +261,7 @@ def _auto_calibrate_vmax(df_all: pd.DataFrame) -> float:
         return max(PC_VMAX_FALLBACK * 0.5, min(PC_VMAX_FALLBACK * 4.0, vmax))
     except Exception:
         return PC_VMAX_FALLBACK
+
 
 def _pitch_control_probs(
     df_frame: pd.DataFrame,
@@ -269,7 +275,6 @@ def _pitch_control_probs(
     Uses a fast time-to-intercept surrogate and exponentiated time decay.
     """
     if df_frame is None or len(df_frame) < 2:
-        # no control without at least 2 players
         gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
         gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
         return gx, gy, np.zeros((grid_h, grid_w), dtype=float)
@@ -281,7 +286,7 @@ def _pitch_control_probs(
     pts = np.stack([Gx.ravel(), Gy.ravel()], axis=1)  # (N,2)
 
     # players
-    xs = df_frame["x"].to_numpy(dtype=float)    # (M,)
+    xs = df_frame["x"].to_numpy(dtype=float)
     ys = df_frame["y"].to_numpy(dtype=float)
     vxs = df_frame["vx"].to_numpy(dtype=float)
     vys = df_frame["vy"].to_numpy(dtype=float)
@@ -290,32 +295,30 @@ def _pitch_control_probs(
     is_def = (teams == "Defense")
 
     if is_off.sum() == 0 or is_def.sum() == 0:
-        # Edge case: only one team present
         Z = np.ones((grid_h, grid_w), dtype=float) if is_off.sum() > 0 else np.zeros((grid_h, grid_w), dtype=float)
         return gx, gy, Z
 
-    speeds = np.sqrt(vxs * vxs + vys * vys)     # (M,)
+    speeds = np.sqrt(vxs * vxs + vys * vys)
 
     # distances to all grid points
-    # Shape trick: (M,1) - (1,N) broadcast
-    dx = xs[:, None] - pts[None, :, 0]          # (M,N)
+    dx = xs[:, None] - pts[None, :, 0]
     dy = ys[:, None] - pts[None, :, 1]
-    d = np.sqrt(dx * dx + dy * dy) + 1e-9       # avoid divide by zero
+    d = np.sqrt(dx * dx + dy * dy) + 1e-9
 
-    # simple surrogate time-to-intercept (vectorized)
-    # reaction delay + (remaining distance after acceleration credit)/vmax
-    t = PC_TAU_REACT + np.maximum(0.0, d - speeds[:, None] * PC_TAU_ACCEL) / max(vmax, 1e-3)  # (M,N)
+    # surrogate time-to-intercept
+    t = PC_TAU_REACT + np.maximum(0.0, d - speeds[:, None] * PC_TAU_ACCEL) / max(vmax, 1e-3)
 
     # capture rates and team sums
-    r = np.exp(-PC_LAMBDA * t)                  # (M,N)
-    R_off = r[is_off].sum(axis=0)               # (N,)
-    R_def = r[is_def].sum(axis=0)               # (N,)
+    r = np.exp(-PC_LAMBDA * t)
+    R_off = r[is_off].sum(axis=0)
+    R_def = r[is_def].sum(axis=0)
 
     Z_off = (R_off / (R_off + R_def + 1e-12)).reshape((grid_h, grid_w))
     return gx, gy, Z_off
 
+
 def _pc_cached_for_timestamp(ts: int, df_all: pd.DataFrame, bounds: Dict[str, float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Cache pitch control per timestamp for speed."""
+    """Cache pitch control per timestamp for speed (used in playback mode)."""
     if ts in _PC_CACHE:
         Z = _PC_CACHE[ts]
         gx = np.linspace(bounds["x_min"], bounds["x_max"], PC_GRID_W)
@@ -327,12 +330,14 @@ def _pc_cached_for_timestamp(ts: int, df_all: pd.DataFrame, bounds: Dict[str, fl
     _PC_CACHE[ts] = Z
     return gx, gy, Z
 
+
 # --------------------------------------------------------------------------------------
 # Figure builder
 # --------------------------------------------------------------------------------------
 
 def build_tracking_figure(
-    df_frame: pd.DataFrame,
+    df_frame_for_display: pd.DataFrame,           # may be team-filtered
+    df_frame_for_pc_full: pd.DataFrame,           # both teams, edited if in editor
     trails_df: Optional[pd.DataFrame],
     bounds: Dict[str, float],
     team_filter: str,
@@ -353,10 +358,11 @@ def build_tracking_figure(
     data: List[go.Scatter] = []
     shape_index_map: List[str] = []
 
-    df_frame = _clamp_df(df_frame, bounds)
+    df_frame = _clamp_df(df_frame_for_display, bounds)
+    df_pc_full = _clamp_df(df_frame_for_pc_full, bounds)
     trails_df = _clamp_df(trails_df, bounds)
 
-    # team filter (affects players/trails/voronoi, not pitch control – we still compute both teams)
+    # team filter (affects players/trails/voronoi; PC uses df_pc_full with both teams)
     if team_filter != "both":
         keep = "Offense" if team_filter == "offense" else "Defense"
         df_frame = df_frame[df_frame["team"] == keep]
@@ -376,8 +382,13 @@ def build_tracking_figure(
 
     # pitch control heatmap (below everything)
     if show_pc:
-        gx, gy, Z = _pc_cached_for_timestamp(current_ts, df, bounds)
-        # Heatmap drawn first so it sits under players/paths
+        if mode == "editor":
+            # Live recompute from edited positions (both teams)
+            gx, gy, Z = _pitch_control_probs(df_pc_full, bounds, PC_GRID_W, PC_GRID_H, PC_VMAX)
+        else:
+            # Fast cached version for playback
+            gx, gy, Z = _pc_cached_for_timestamp(current_ts, df, bounds)
+
         data.append(
             go.Heatmap(
                 x=gx, y=gy, z=Z,
@@ -422,8 +433,8 @@ def build_tracking_figure(
     fig.update_layout(
         autosize=True,
         uirevision="static",  # keep view stable across updates
-        showlegend=False,     # eliminate legend-driven jiggle
-        title=None,           # avoid title placeholders
+        showlegend=False,
+        title=None,
         xaxis=dict(range=[bounds["x_min"], bounds["x_max"]], showgrid=False, zeroline=False, visible=False),
         yaxis=dict(range=[bounds["y_min"], bounds["y_max"]], showgrid=False, zeroline=False,
                    visible=False, scaleanchor="x", scaleratio=1),
@@ -433,7 +444,6 @@ def build_tracking_figure(
     )
 
     # players + velocity arrows
-    velocity_annots: List[Dict[str, Any]] = []
     if show_players and not df_frame.empty:
         if mode == "editor" and edits_enabled:
             shapes = []
@@ -468,11 +478,9 @@ def build_tracking_figure(
                     )
             # velocity arrows (added to the same annotations list)
             if show_velocity:
-                velocity_annots = _velocity_annotations(df_frame)
-                annotations.extend(velocity_annots)
+                annotations.extend(_velocity_annotations(df_frame))
             fig.update_layout(shapes=shapes, annotations=annotations)
         else:
-            # playback markers with jersey numbers in the markers
             for team in ["Offense", "Defense"]:
                 sub = df_frame[df_frame["team"] == team]
                 if sub.empty:
@@ -485,12 +493,11 @@ def build_tracking_figure(
                         showlegend=False,
                     )
                 )
-            # velocity arrows as annotations
             if show_velocity:
-                velocity_annots = _velocity_annotations(df_frame)
-                fig.update_layout(annotations=velocity_annots)
+                fig.update_layout(annotations=_velocity_annotations(df_frame))
 
     return fig, shape_index_map
+
 
 # --------------------------------------------------------------------------------------
 # UI builders
@@ -516,6 +523,7 @@ def build_header() -> html.Div:
         className="sb-header",
     )
 
+
 def build_top_row(bounds: Dict[str, float]) -> html.Div:
     ar_padding = _aspect_padding_from_bounds(bounds)
     video_path = Path("assets") / VIDEO_FILENAME
@@ -536,16 +544,15 @@ def build_top_row(bounds: Dict[str, float]) -> html.Div:
     )
     return html.Div([left, right], className="sb-grid-2col")
 
+
 def build_bottom_panel(timestamps: List[int]) -> html.Div:
     n = len(timestamps)
     start, end = 0, n - 1
 
     return html.Div(
         [
-            # Single enclosed suite
             html.Div(
                 [
-                    # Centered toolbar: [Mode selector] | playback controls + right readout
                     html.Div(
                         [
                             html.Div(className="sb-controls-spacer"),
@@ -593,7 +600,6 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
 
                     html.Div(className="sb-divider"),
 
-                    # Single scrubber
                     html.Div(
                         dcc.Slider(
                             id="time-slider-main",
@@ -607,7 +613,6 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
 
                     html.Div(className="sb-divider"),
 
-                    # Editor/Overlay controls
                     html.Div(
                         [
                             html.Div(
@@ -659,11 +664,11 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
         className="sb-bottom",
     )
 
+
 # --------------------------------------------------------------------------------------
 # Build data & app at import time (Render needs server at module scope)
 # --------------------------------------------------------------------------------------
 
-# Ensure assets exists (Dash serves /assets automatically)
 Path("assets").mkdir(exist_ok=True)
 
 if not Path(DEFENSIVE_CSV).exists() or not Path(OFFENSIVE_CSV).exists():
@@ -678,34 +683,31 @@ if not timestamps:
 PC_VMAX = _auto_calibrate_vmax(df)
 
 app: Dash = dash.Dash(__name__)
-server = app.server  # <-- exported for gunicorn
+server = app.server
 
 app.title = "Sunbears Dashboard"
 app.layout = html.Div(
     [
         build_header(),
         html.Div([build_top_row(RINK_BOUNDS), build_bottom_panel(timestamps)], className="sb-container"),
-        # timers & state
         dcc.Interval(id="play-interval", interval=int(BASE_INTERVAL_MS), disabled=True),
-        dcc.Interval(id="video-poll", interval=500, n_intervals=0),  # poll <video> state
+        dcc.Interval(id="video-poll", interval=500, n_intervals=0),
         dcc.Store(id="is-playing", data=False),
         dcc.Store(id="timestamps", data=timestamps),
-        dcc.Store(id="edits-store", data={}),          # { "ts": { "Team|player": {"x":..,"y":..,"team":..} } }
-        dcc.Store(id="shape-index-map", data=[]),      # ["Team|player", ...] aligned with layout.shapes order
-
-        # Video sync plumbing
-        dcc.Store(id="video-ctrl", data=None),         # {action:'play'|'pause', restart?:bool, token?:str}
-        dcc.Store(id="video-state", data={"playing": False, "ended": False}),  # polled state
+        dcc.Store(id="edits-store", data={}),
+        dcc.Store(id="shape-index-map", data=[]),
+        dcc.Store(id="video-ctrl", data=None),
+        dcc.Store(id="video-state", data={"playing": False, "ended": False}),
     ],
     className="sb-page",
     style=STYLES["page"],
 )
 
+
 # --------------------------------------------------------------------------------------
 # Callbacks
 # --------------------------------------------------------------------------------------
 
-# Speed -> interval (shared between figure & video)
 @app.callback(Output("play-interval", "interval"), Input("speed-dropdown", "value"))
 def set_speed(rate):
     try:
@@ -713,14 +715,12 @@ def set_speed(rate):
         rate = max(0.1, min(2.0, rate))
     except Exception:
         rate = 1.0
-    return int(max(20, BASE_INTERVAL_MS / rate))  # 0.5× => 200ms, 2× => 50ms
+    return int(max(20, BASE_INTERVAL_MS / rate))
 
-# Disable Play button in Editor Mode (to avoid conflicts)
 @app.callback(Output("btn-play", "disabled"), Input("mode-selector", "value"))
 def toggle_play_disabled(mode):
     return mode == "editor"
 
-# Playback driver (tracking + issuing video commands). No dependency on video-state.
 @app.callback(
     Output("time-slider-main", "value"),
     Output("is-playing", "data"),
@@ -748,23 +748,19 @@ def playback_driver(_tick, _prev, _next, _play_clicks, mode,
     last = total - 1
     loop_on = "loop" in (loop_vals or [])
 
-    # Mode switched -> pause both (unique token)
     if trigger == "mode-selector":
         return cur_idx, False, True, {"action": "pause", "token": f"mode:{mode}:{cur_idx}"}
 
-    # Play/Pause button toggled
     if trigger == "btn-play":
         new_playing = not bool(is_playing)
         new_idx = cur_idx
         if new_playing and cur_idx >= last:
-            new_idx = 0  # restart tracking if at end
+            new_idx = 0
         vid_cmd = {"action": "pause", "token": f"btn:{_play_clicks}:pause"}
         if new_playing:
-            # restart video too if it had ended
             vid_cmd = {"action": "play", "restart": True, "token": f"btn:{_play_clicks}:play"}
         return new_idx, new_playing, (not new_playing), vid_cmd
 
-    # Previous frame
     if trigger == "btn-prev":
         if loop_on and cur_idx == 0:
             new_idx = last
@@ -772,7 +768,6 @@ def playback_driver(_tick, _prev, _next, _play_clicks, mode,
             new_idx = max(0, cur_idx - 1)
         return new_idx, is_playing, (not is_playing), dash.no_update
 
-    # Next frame
     if trigger == "btn-next":
         if loop_on and cur_idx == last:
             new_idx = 0
@@ -780,28 +775,25 @@ def playback_driver(_tick, _prev, _next, _play_clicks, mode,
             new_idx = min(last, cur_idx + 1)
         return new_idx, is_playing, (not is_playing), dash.no_update
 
-    # Timer tick during playback
     if trigger == "play-interval":
         if not is_playing or mode == "editor":
             raise dash.exceptions.PreventUpdate
         nxt = cur_idx + 1
         if nxt > last:
             if loop_on:
-                # wrap tracking; video looping handled on client
                 return 0, True, False, dash.no_update
             else:
-                # tracking ends first: allow video to continue (no pause/play command)
                 return last, False, True, dash.no_update
         return nxt, True, False, dash.no_update
 
     raise dash.exceptions.PreventUpdate
 
-# Frame readout
+
 @app.callback(Output("frame-readout", "children"), Input("time-slider-main", "value"), State("timestamps", "data"))
 def update_readout(idx, ts_list):
     return f"Frame {idx} / {len(ts_list) - 1}"
 
-# Graph update (figure + shape-index map + graph config)
+
 @app.callback(
     Output("tracking-graph", "figure"),
     Output("shape-index-map", "data"),
@@ -817,12 +809,13 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     current_timestamp = ts_list[time_index]
     ts_key = str(current_timestamp)
 
-    # Current frame data
-    df_frame = df[df["timestamp"] == current_timestamp].copy()
+    # Current frame data (full, both teams)
+    df_frame_full = df[df["timestamp"] == current_timestamp].copy()
 
-    # Apply per-frame edits to the frame (ONLY IN EDITOR MODE)
+    # Apply per-frame edits to BOTH: (a) full frame for PC; (b) display frame (team filter applied later)
     edits_for_ts = (edits_store or {}).get(ts_key, {}) if mode == "editor" else {}
-    df_frame = _apply_edits_to_frame(df_frame, edits_for_ts)
+    df_frame_full = _apply_edits_to_frame(df_frame_full, edits_for_ts)
+    df_frame_for_display = df_frame_full.copy()
 
     # Trails (apply edits to trails only in editor)
     show_trails = "trails" in (overlay_values or [])
@@ -833,7 +826,8 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
         trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
 
     fig, shape_map = build_tracking_figure(
-        df_frame=df_frame,
+        df_frame_for_display=df_frame_for_display,
+        df_frame_for_pc_full=df_frame_full,
         trails_df=trails_df,
         bounds=RINK_BOUNDS,
         team_filter=team_filter,
@@ -847,7 +841,6 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
         edits_enabled=True,
     )
 
-    # Graph config: enable shape dragging ONLY in editor mode with players visible
     if mode == "editor" and ("players" in (overlay_values or [])):
         cfg = {
             "responsive": True,
@@ -867,7 +860,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
 
     return fig, shape_map, cfg
 
-# Edits manager (ephemeral)
+
 @app.callback(
     Output("edits-store", "data"),
     Input("tracking-graph", "relayoutData"),
@@ -885,7 +878,6 @@ def edits_manager(relayout, time_idx, mode, overlays, shape_map, ts_list, edits_
         raise dash.exceptions.PreventUpdate
     trigger = ctx.triggered[0]["prop_id"].split(".")[0]
 
-    # Clear edits on frame OR mode change
     if trigger == "time-slider-main" or trigger == "mode-selector":
         return {}
 
@@ -933,7 +925,9 @@ def edits_manager(relayout, time_idx, mode, overlays, shape_map, ts_list, edits_
 
     return edits_store
 
-# CLIENTSIDE: control HTML5 <video> with command de-dup + report state
+
+# ---------------------- Clientside small helpers ----------------------
+
 app.clientside_callback(
     """
     function(cmd, speedVal, loopVals, _poll) {
@@ -942,15 +936,11 @@ app.clientside_callback(
 
         if (!video) { return state; }
 
-        // Speed - must NOT start playback
         if (speedVal !== undefined && speedVal !== null) {
             try { video.playbackRate = Number(speedVal) || 1.0; } catch (e) {}
         }
-
-        // Loop - must NOT start playback
         try { video.loop = Array.isArray(loopVals) && loopVals.indexOf("loop") !== -1; } catch (e) {}
 
-        // Command de-dup
         try {
             const lastTok = window.__sb_last_cmd_token || null;
             const tok = cmd && cmd.token ? String(cmd.token) : null;
@@ -969,7 +959,6 @@ app.clientside_callback(
             }
         } catch (e) {}
 
-        // Report state
         try {
             state.ended = !!video.ended;
             state.playing = !(video.paused || video.ended);
@@ -985,7 +974,6 @@ app.clientside_callback(
      Input("video-poll", "n_intervals")],
 )
 
-# CLIENTSIDE: button label (union of tracking/video states)
 app.clientside_callback(
     """
     function(isPlaying, vstate) {
@@ -997,6 +985,6 @@ app.clientside_callback(
     [Input("is-playing", "data"), Input("video-state", "data")],
 )
 
-# Dev entry point
+
 if __name__ == "__main__":
     app.run(debug=True)
