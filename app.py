@@ -68,8 +68,8 @@ VELOCITY_HEAD_MAX  = 1.2            # cap absolute head length
 VELOCITY_HEAD_DEG  = 28.0           # head opening half-angle (deg)
 
 # -------- Pitch Control (beta) parameters --------
-PC_GRID_W = 40
-PC_GRID_H = 20
+PC_GRID_W = 240
+PC_GRID_H = 120
 PC_TAU_REACT = 0.40   # s
 PC_TAU_ACCEL = 0.70   # s of "speed credit"
 PC_LAMBDA = 1.6       # time decay -> sharper vs softer fields
