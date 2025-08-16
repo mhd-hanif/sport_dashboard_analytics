@@ -40,8 +40,10 @@ from utils import compute_voronoi  # Voronoi + clipping
 # --------------------------------------------------------------------------------------
 
 # Files
-DEFENSIVE_CSV = "assets/defensive_players_hockey.csv"
-OFFENSIVE_CSV = "assets/offensive_players_hockey.csv"
+# DEFENSIVE_CSV = "assets/defensive_players_hockey.csv"
+# OFFENSIVE_CSV = "assets/offensive_players_hockey.csv"
+DEFENSIVE_CSV = "assets/defensive_players_with_velocity.csv"
+OFFENSIVE_CSV = "assets/offensive_players_with_velocity.csv"
 VIDEO_FILENAME = "sample_video.mp4"   # place under ./assets/ (optional)
 FIELD_IMAGE = "field_hockey.png"      # rink image under ./assets/
 ICON_IMAGE = "sunbears_icon.webp"     # header icon under ./assets/
