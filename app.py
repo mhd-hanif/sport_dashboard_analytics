@@ -25,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
+import numpy as np
 import dash
 from dash import html, dcc, Dash
 from dash.dependencies import Input, Output, State
@@ -33,7 +34,6 @@ import pandas as pd
 import plotly.graph_objs as go
 
 from utils import compute_voronoi  # Voronoi + clipping
-
 
 # --------------------------------------------------------------------------------------
 # Configuration
@@ -57,14 +57,27 @@ TRAIL_DEFAULT = 40
 # Player circle radius for Editor Mode (rink-units)
 PLAYER_RADIUS = 0.7
 
-# Velocity arrows (display units are rink units)
+# -------- Velocity arrows (display units are rink units) --------
 VELOCITY_MIN_MAG = 0.01
-VELOCITY_SCALE   = 2.0   
-VELOCITY_MAX_LEN = 4.0   
-VELOCITY_LINE_W  = 3     
+VELOCITY_SCALE   = 2.0
+VELOCITY_MAX_LEN = 4.0
+VELOCITY_LINE_W  = 3
 VELOCITY_ARROWHEAD  = 3
-VELOCITY_ARROWSIZE = 0.5 
+VELOCITY_ARROWSIZE = 0.5
 
+# -------- Pitch Control (beta) parameters --------
+# Small, fast grid works well on Render free tier
+PC_GRID_W = 120
+PC_GRID_H = 60
+PC_TAU_REACT = 0.40   # s
+PC_TAU_ACCEL = 0.70   # s of "speed credit"
+PC_LAMBDA = 1.6       # time decay -> sharper vs softer fields
+PC_OPACITY = 0.50     # heatmap opacity
+# v_max will be auto-calibrated from data after loading
+PC_VMAX_FALLBACK = 5.0
+PC_VMAX: float = PC_VMAX_FALLBACK
+# Cached per timestamp to avoid recomputing every tick
+_PC_CACHE: Dict[int, np.ndarray] = {}
 
 STYLES: Dict[str, Any] = {
     "page": {"background": "#f6f7fb", "fontFamily": "Inter, Segoe UI, Arial, sans-serif"},
@@ -78,9 +91,15 @@ VORONOI_FILL = {
     "Offense": "rgba(248,223,220,0.55)",  # #f8dfdc @ 55%
 }
 
+# Heatmap colorscale (Defense→Offense)
+PC_COLORSCALE = [
+    [0.00, "rgb(46,134,222)"],   # Defense blue
+    [0.50, "rgb(245,246,250)"],  # near white
+    [1.00, "rgb(231,76,60)"],    # Offense red
+]
+
 # Shared timer base at 1× speed (ms)
 BASE_INTERVAL_MS = 100.0
-
 
 # --------------------------------------------------------------------------------------
 # Data loading
@@ -133,7 +152,6 @@ def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
     df.reset_index(drop=True, inplace=True)
     return df
 
-
 # --------------------------------------------------------------------------------------
 # Utilities
 # --------------------------------------------------------------------------------------
@@ -146,11 +164,9 @@ def _clamp_df(df_: Optional[pd.DataFrame], bounds: Dict[str, float]) -> Optional
     df_["y"] = df_["y"].clip(bounds["y_min"], bounds["y_max"])
     return df_
 
-
 def make_trails(df: pd.DataFrame, current_ts: int, trail_len: int) -> pd.DataFrame:
     start_ts = max(df["timestamp"].min(), current_ts - trail_len)
     return df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= current_ts)].copy()
-
 
 def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
     w = bounds["x_max"] - bounds["x_min"]
@@ -158,19 +174,18 @@ def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
     pct = (h / w) * 100.0 if w > 0 else 56.25
     return f"{pct:.3f}%"
 
-
 def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
     """Apply per-frame edited positions to a single-frame dataframe."""
     if not edits_for_ts:
         return df_frame
     df_frame = df_frame.copy()
     df_frame["__key"] = df_frame["team"].astype(str) + "|" + df_frame["player_id"].astype(str)
+    keys = set(df_frame["__key"])
     for key, info in edits_for_ts.items():
-        if key in set(df_frame["__key"]) and "x" in info and "y" in info:
+        if key in keys and "x" in info and "y" in info:
             df_frame.loc[df_frame["__key"] == key, ["x", "y"]] = [info["x"], info["y"]]
     df_frame.drop(columns="__key", inplace=True)
     return df_frame
-
 
 def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any]) -> pd.DataFrame:
     """Optionally reflect edited positions on the recent trail segment for visual continuity."""
@@ -194,7 +209,6 @@ def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any])
     trails_df.drop(columns="__key", inplace=True)
     return trails_df
 
-
 def _velocity_annotations(df_frame: pd.DataFrame) -> List[Dict[str, Any]]:
     """Create Plotly annotation arrows for velocity vectors from vx, vy."""
     if df_frame is None or df_frame.empty:
@@ -206,7 +220,6 @@ def _velocity_annotations(df_frame: pd.DataFrame) -> List[Dict[str, Any]]:
         mag = (vx * vx + vy * vy) ** 0.5
         if mag < VELOCITY_MIN_MAG:
             continue
-        # scaled & capped length
         L = min(VELOCITY_MAX_LEN, mag * VELOCITY_SCALE)
         if L <= 0:
             continue
@@ -232,6 +245,87 @@ def _velocity_annotations(df_frame: pd.DataFrame) -> List[Dict[str, Any]]:
         )
     return annots
 
+# -------- Pitch Control (beta): fast symmetric model --------
+
+def _auto_calibrate_vmax(df_all: pd.DataFrame) -> float:
+    try:
+        sp = np.sqrt(np.square(df_all["vx"].to_numpy()) + np.square(df_all["vy"].to_numpy()))
+        vmax = float(np.nanpercentile(sp, 95))
+        if not np.isfinite(vmax) or vmax <= 0:
+            return PC_VMAX_FALLBACK
+        return max(PC_VMAX_FALLBACK * 0.5, min(PC_VMAX_FALLBACK * 4.0, vmax))
+    except Exception:
+        return PC_VMAX_FALLBACK
+
+def _pitch_control_probs(
+    df_frame: pd.DataFrame,
+    bounds: Dict[str, float],
+    grid_w: int = PC_GRID_W,
+    grid_h: int = PC_GRID_H,
+    vmax: float = PC_VMAX
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns (x_grid, y_grid, Z_offense) where Z_offense in [0,1] with shape (grid_h, grid_w).
+    Uses a fast time-to-intercept surrogate and exponentiated time decay.
+    """
+    if df_frame is None or len(df_frame) < 2:
+        # no control without at least 2 players
+        gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
+        gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
+        return gx, gy, np.zeros((grid_h, grid_w), dtype=float)
+
+    # grid (centers)
+    gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
+    gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
+    Gx, Gy = np.meshgrid(gx, gy)                # (H,W)
+    pts = np.stack([Gx.ravel(), Gy.ravel()], axis=1)  # (N,2)
+
+    # players
+    xs = df_frame["x"].to_numpy(dtype=float)    # (M,)
+    ys = df_frame["y"].to_numpy(dtype=float)
+    vxs = df_frame["vx"].to_numpy(dtype=float)
+    vys = df_frame["vy"].to_numpy(dtype=float)
+    teams = df_frame["team"].astype(str).to_numpy()
+    is_off = (teams == "Offense")
+    is_def = (teams == "Defense")
+
+    if is_off.sum() == 0 or is_def.sum() == 0:
+        # Edge case: only one team present
+        Z = np.ones((grid_h, grid_w), dtype=float) if is_off.sum() > 0 else np.zeros((grid_h, grid_w), dtype=float)
+        return gx, gy, Z
+
+    speeds = np.sqrt(vxs * vxs + vys * vys)     # (M,)
+
+    # distances to all grid points
+    # Shape trick: (M,1) - (1,N) broadcast
+    dx = xs[:, None] - pts[None, :, 0]          # (M,N)
+    dy = ys[:, None] - pts[None, :, 1]
+    d = np.sqrt(dx * dx + dy * dy) + 1e-9       # avoid divide by zero
+
+    # simple surrogate time-to-intercept (vectorized)
+    # reaction delay + (remaining distance after acceleration credit)/vmax
+    t = PC_TAU_REACT + np.maximum(0.0, d - speeds[:, None] * PC_TAU_ACCEL) / max(vmax, 1e-3)  # (M,N)
+
+    # capture rates and team sums
+    r = np.exp(-PC_LAMBDA * t)                  # (M,N)
+    R_off = r[is_off].sum(axis=0)               # (N,)
+    R_def = r[is_def].sum(axis=0)               # (N,)
+
+    Z_off = (R_off / (R_off + R_def + 1e-12)).reshape((grid_h, grid_w))
+    return gx, gy, Z_off
+
+def _pc_cached_for_timestamp(ts: int, df_all: pd.DataFrame, bounds: Dict[str, float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cache pitch control per timestamp for speed."""
+    if ts in _PC_CACHE:
+        Z = _PC_CACHE[ts]
+        gx = np.linspace(bounds["x_min"], bounds["x_max"], PC_GRID_W)
+        gy = np.linspace(bounds["y_min"], bounds["y_max"], PC_GRID_H)
+        return gx, gy, Z
+
+    df_frame = df_all[df_all["timestamp"] == ts]
+    gx, gy, Z = _pitch_control_probs(df_frame, bounds, PC_GRID_W, PC_GRID_H, PC_VMAX)
+    _PC_CACHE[ts] = Z
+    return gx, gy, Z
 
 # --------------------------------------------------------------------------------------
 # Figure builder
@@ -246,6 +340,8 @@ def build_tracking_figure(
     show_voronoi: bool,
     show_trails: bool,
     show_velocity: bool,
+    show_pc: bool,
+    current_ts: int,
     mode: str,
     edits_enabled: bool,
 ) -> Tuple[go.Figure, List[str]]:
@@ -260,7 +356,7 @@ def build_tracking_figure(
     df_frame = _clamp_df(df_frame, bounds)
     trails_df = _clamp_df(trails_df, bounds)
 
-    # team filter
+    # team filter (affects players/trails/voronoi, not pitch control – we still compute both teams)
     if team_filter != "both":
         keep = "Offense" if team_filter == "offense" else "Defense"
         df_frame = df_frame[df_frame["team"] == keep]
@@ -277,6 +373,21 @@ def build_tracking_figure(
                     hoverinfo="skip", showlegend=False,
                 )
             )
+
+    # pitch control heatmap (below everything)
+    if show_pc:
+        gx, gy, Z = _pc_cached_for_timestamp(current_ts, df, bounds)
+        # Heatmap drawn first so it sits under players/paths
+        data.append(
+            go.Heatmap(
+                x=gx, y=gy, z=Z,
+                colorscale=PC_COLORSCALE,
+                zmin=0.0, zmax=1.0,
+                showscale=False,
+                hovertemplate="Offense control: %{z:.2f}<extra></extra>",
+                opacity=PC_OPACITY,
+            )
+        )
 
     # voronoi (team-colored, slightly transparent)
     if show_voronoi and len(df_frame) >= 2:
@@ -381,7 +492,6 @@ def build_tracking_figure(
 
     return fig, shape_index_map
 
-
 # --------------------------------------------------------------------------------------
 # UI builders
 # --------------------------------------------------------------------------------------
@@ -406,7 +516,6 @@ def build_header() -> html.Div:
         className="sb-header",
     )
 
-
 def build_top_row(bounds: Dict[str, float]) -> html.Div:
     ar_padding = _aspect_padding_from_bounds(bounds)
     video_path = Path("assets") / VIDEO_FILENAME
@@ -426,7 +535,6 @@ def build_top_row(bounds: Dict[str, float]) -> html.Div:
         className="sb-media sb-media--video", style={"--ar": ar_padding},
     )
     return html.Div([left, right], className="sb-grid-2col")
-
 
 def build_bottom_panel(timestamps: List[int]) -> html.Div:
     n = len(timestamps)
@@ -529,8 +637,8 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                             {"label": "Show Trails", "value": "trails"},
                                             {"label": "Show Voronoi", "value": "voronoi"},
                                             {"label": "Show Velocity", "value": "velocity"},
+                                            {"label": "Pitch Control (beta)", "value": "pc"},
                                             {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
-                                            {"label": "Pitch Control (soon)", "value": "pc", "disabled": True},
                                             {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
                                         ],
                                         value=["players", "voronoi"],
@@ -551,7 +659,6 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
         className="sb-bottom",
     )
 
-
 # --------------------------------------------------------------------------------------
 # Build data & app at import time (Render needs server at module scope)
 # --------------------------------------------------------------------------------------
@@ -566,6 +673,9 @@ df = load_tracking_data(DEFENSIVE_CSV, OFFENSIVE_CSV)
 timestamps = sorted(df["timestamp"].unique())
 if not timestamps:
     raise RuntimeError("No timestamps found in tracking data.")
+
+# Calibrate v_max from data (95th percentile of speed)
+PC_VMAX = _auto_calibrate_vmax(df)
 
 app: Dash = dash.Dash(__name__)
 server = app.server  # <-- exported for gunicorn
@@ -591,7 +701,6 @@ app.layout = html.Div(
     style=STYLES["page"],
 )
 
-
 # --------------------------------------------------------------------------------------
 # Callbacks
 # --------------------------------------------------------------------------------------
@@ -606,12 +715,10 @@ def set_speed(rate):
         rate = 1.0
     return int(max(20, BASE_INTERVAL_MS / rate))  # 0.5× => 200ms, 2× => 50ms
 
-
 # Disable Play button in Editor Mode (to avoid conflicts)
 @app.callback(Output("btn-play", "disabled"), Input("mode-selector", "value"))
 def toggle_play_disabled(mode):
     return mode == "editor"
-
 
 # Playback driver (tracking + issuing video commands). No dependency on video-state.
 @app.callback(
@@ -689,12 +796,10 @@ def playback_driver(_tick, _prev, _next, _play_clicks, mode,
 
     raise dash.exceptions.PreventUpdate
 
-
 # Frame readout
 @app.callback(Output("frame-readout", "children"), Input("time-slider-main", "value"), State("timestamps", "data"))
 def update_readout(idx, ts_list):
     return f"Frame {idx} / {len(ts_list) - 1}"
-
 
 # Graph update (figure + shape-index map + graph config)
 @app.callback(
@@ -722,6 +827,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     # Trails (apply edits to trails only in editor)
     show_trails = "trails" in (overlay_values or [])
     show_velocity = "velocity" in (overlay_values or [])
+    show_pc = "pc" in (overlay_values or [])
     trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
     if trails_df is not None and mode == "editor":
         trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
@@ -735,6 +841,8 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
         show_voronoi=("voronoi" in (overlay_values or [])),
         show_trails=show_trails,
         show_velocity=show_velocity,
+        show_pc=show_pc,
+        current_ts=current_timestamp,
         mode=mode,
         edits_enabled=True,
     )
@@ -758,7 +866,6 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
         cfg = {"responsive": True, "displayModeBar": True, "editable": False}
 
     return fig, shape_map, cfg
-
 
 # Edits manager (ephemeral)
 @app.callback(
@@ -826,7 +933,6 @@ def edits_manager(relayout, time_idx, mode, overlays, shape_map, ts_list, edits_
 
     return edits_store
 
-
 # CLIENTSIDE: control HTML5 <video> with command de-dup + report state
 app.clientside_callback(
     """
@@ -890,7 +996,6 @@ app.clientside_callback(
     Output("btn-play", "children"),
     [Input("is-playing", "data"), Input("video-state", "data")],
 )
-
 
 # Dev entry point
 if __name__ == "__main__":
