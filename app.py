@@ -57,6 +57,15 @@ TRAIL_DEFAULT = 40
 # Player circle radius for Editor Mode (rink-units)
 PLAYER_RADIUS = 0.7
 
+# Velocity arrows (display units are rink units)
+VELOCITY_MIN_MAG = 0.01
+VELOCITY_SCALE   = 2.0   
+VELOCITY_MAX_LEN = 4.0   
+VELOCITY_LINE_W  = 3     
+VELOCITY_ARROWHEAD  = 3
+VELOCITY_ARROWSIZE = 0.5 
+
+
 STYLES: Dict[str, Any] = {
     "page": {"background": "#f6f7fb", "fontFamily": "Inter, Segoe UI, Arial, sans-serif"},
 }
@@ -78,18 +87,19 @@ BASE_INTERVAL_MS = 100.0
 # --------------------------------------------------------------------------------------
 
 def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
-    """Read both CSVs, normalize columns, add team labels, sort by time."""
+    """Read both CSVs, normalize columns, add team labels, sort by time.
+       vx, vy are optional; filled with 0 if missing."""
     def _read_and_normalize(p: str, label: str) -> pd.DataFrame:
         df = pd.read_csv(p)
         df.columns = [c.strip() for c in df.columns]
 
-        # Map timeframe->timestamp; keep player_id, x, y
-        col_map = {}
+        # Map timeframe->timestamp; keep player_id, x, y, vx, vy (optional)
+        col_map: Dict[str, str] = {}
         for c in df.columns:
             lc = c.lower()
             if lc == "timeframe":
                 col_map[c] = "timestamp"
-            elif lc in {"timestamp", "player_id", "x", "y"}:
+            elif lc in {"timestamp", "player_id", "x", "y", "vx", "vy"}:
                 col_map[c] = lc
         if col_map:
             df.rename(columns=col_map, inplace=True)
@@ -99,12 +109,20 @@ def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
         if missing:
             raise ValueError(f"Missing columns in {label} data: {missing}. Found: {list(df.columns)}")
 
+        # Optional velocity columns
+        if "vx" not in df.columns:
+            df["vx"] = 0.0
+        if "vy" not in df.columns:
+            df["vy"] = 0.0
+
         df["timestamp"] = df["timestamp"].astype(int)
         df["player_id"] = df["player_id"].astype(str)
         df["x"] = df["x"].astype(float)
         df["y"] = df["y"].astype(float)
+        df["vx"] = df["vx"].astype(float)
+        df["vy"] = df["vy"].astype(float)
         df["team"] = label
-        return df[["timestamp", "player_id", "team", "x", "y"]]
+        return df[["timestamp", "player_id", "team", "x", "y", "vx", "vy"]]
 
     def_df = _read_and_normalize(def_path, "Defense")
     off_df = _read_and_normalize(off_path, "Offense")
@@ -177,6 +195,44 @@ def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any])
     return trails_df
 
 
+def _velocity_annotations(df_frame: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Create Plotly annotation arrows for velocity vectors from vx, vy."""
+    if df_frame is None or df_frame.empty:
+        return []
+    annots: List[Dict[str, Any]] = []
+    for _, row in df_frame.iterrows():
+        vx = float(row.get("vx", 0.0))
+        vy = float(row.get("vy", 0.0))
+        mag = (vx * vx + vy * vy) ** 0.5
+        if mag < VELOCITY_MIN_MAG:
+            continue
+        # scaled & capped length
+        L = min(VELOCITY_MAX_LEN, mag * VELOCITY_SCALE)
+        if L <= 0:
+            continue
+        dx = (vx / (mag + 1e-9)) * L
+        dy = (vy / (mag + 1e-9)) * L
+        x0 = float(row["x"])
+        y0 = float(row["y"])
+        x1 = x0 + dx
+        y1 = y0 + dy
+        team = str(row.get("team", "Offense"))
+        color = COLOR_MAP.get(team, "#333")
+        annots.append(
+            dict(
+                xref="x", yref="y", axref="x", ayref="y",
+                x=x1, y=y1, ax=x0, ay=y0,
+                showarrow=True,
+                arrowhead=VELOCITY_ARROWHEAD,
+                arrowsize=VELOCITY_ARROWSIZE,
+                arrowwidth=VELOCITY_LINE_W,
+                arrowcolor=color,
+                opacity=0.95,
+            )
+        )
+    return annots
+
+
 # --------------------------------------------------------------------------------------
 # Figure builder
 # --------------------------------------------------------------------------------------
@@ -189,6 +245,7 @@ def build_tracking_figure(
     show_players: bool,
     show_voronoi: bool,
     show_trails: bool,
+    show_velocity: bool,
     mode: str,
     edits_enabled: bool,
 ) -> Tuple[go.Figure, List[str]]:
@@ -264,7 +321,8 @@ def build_tracking_figure(
         hovermode="closest",
     )
 
-    # players: markers (playback) OR draggable shapes (editor)
+    # players + velocity arrows
+    velocity_annots: List[Dict[str, Any]] = []
     if show_players and not df_frame.empty:
         if mode == "editor" and edits_enabled:
             shapes = []
@@ -297,8 +355,13 @@ def build_tracking_figure(
                             font=dict(color="white", size=12, family="Inter, Arial"),
                         )
                     )
+            # velocity arrows (added to the same annotations list)
+            if show_velocity:
+                velocity_annots = _velocity_annotations(df_frame)
+                annotations.extend(velocity_annots)
             fig.update_layout(shapes=shapes, annotations=annotations)
         else:
+            # playback markers with jersey numbers in the markers
             for team in ["Offense", "Defense"]:
                 sub = df_frame[df_frame["team"] == team]
                 if sub.empty:
@@ -311,6 +374,10 @@ def build_tracking_figure(
                         showlegend=False,
                     )
                 )
+            # velocity arrows as annotations
+            if show_velocity:
+                velocity_annots = _velocity_annotations(df_frame)
+                fig.update_layout(annotations=velocity_annots)
 
     return fig, shape_index_map
 
@@ -461,6 +528,7 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                             {"label": "Show Players", "value": "players"},
                                             {"label": "Show Trails", "value": "trails"},
                                             {"label": "Show Voronoi", "value": "voronoi"},
+                                            {"label": "Show Velocity", "value": "velocity"},
                                             {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
                                             {"label": "Pitch Control (soon)", "value": "pc", "disabled": True},
                                             {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
@@ -653,6 +721,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
 
     # Trails (apply edits to trails only in editor)
     show_trails = "trails" in (overlay_values or [])
+    show_velocity = "velocity" in (overlay_values or [])
     trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
     if trails_df is not None and mode == "editor":
         trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
@@ -665,6 +734,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
         show_players=("players" in (overlay_values or [])),
         show_voronoi=("voronoi" in (overlay_values or [])),
         show_trails=show_trails,
+        show_velocity=show_velocity,
         mode=mode,
         edits_enabled=True,
     )
