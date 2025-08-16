@@ -9,7 +9,7 @@ Sunbears Sports Analytics Dashboard (Dash)
   • Editor controls (team filter + overlay chips + Reset)
 - Editor Mode (ephemeral edits):
   • Playback auto-pauses, Play button disabled
-  • Drag players by moving the circle (move-only; fixed radius). Jersey numbers follow automatically.
+  • Drag players by moving the circle (move-only; fixed radius)
   • Voronoi & Pitch Control recompute instantly from edited positions (current frame only)
   • Changing frame OR switching modes clears edits; returning to a frame shows original data
 
@@ -25,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
+import math
 import numpy as np
 import dash
 from dash import html, dcc, Dash
@@ -60,13 +61,15 @@ PLAYER_RADIUS = 0.7
 VELOCITY_MIN_MAG = 0.01
 VELOCITY_SCALE   = 2.0
 VELOCITY_MAX_LEN = 4.0
-VELOCITY_LINE_W  = 3
-VELOCITY_ARROWHEAD  = 3
-VELOCITY_ARROWSIZE = 0.5
+VELOCITY_LINE_W  = 2
+# Quiver arrowhead geometry
+VELOCITY_HEAD_FRAC = 0.35           # fraction of shaft length
+VELOCITY_HEAD_MAX  = 1.2            # cap absolute head length
+VELOCITY_HEAD_DEG  = 28.0           # head opening half-angle (deg)
 
 # -------- Pitch Control (beta) parameters --------
-PC_GRID_W = 120
-PC_GRID_H = 60
+PC_GRID_W = 40
+PC_GRID_H = 20
 PC_TAU_REACT = 0.40   # s
 PC_TAU_ACCEL = 0.70   # s of "speed credit"
 PC_LAMBDA = 1.6       # time decay -> sharper vs softer fields
@@ -213,44 +216,66 @@ def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any])
     return trails_df
 
 
-def _velocity_annotations(df_frame: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Create Plotly annotation arrows for velocity vectors from vx, vy."""
-    if df_frame is None or df_frame.empty:
-        return []
-    annots: List[Dict[str, Any]] = []
-    for _, row in df_frame.iterrows():
-        vx = float(row.get("vx", 0.0))
-        vy = float(row.get("vy", 0.0))
-        mag = (vx * vx + vy * vy) ** 0.5
-        if mag < VELOCITY_MIN_MAG:
+# ---------- Velocity as NON-DRAGGABLE quiver line traces ----------
+def _velocity_quiver_traces(df_frame: pd.DataFrame) -> List[go.Scatter]:
+    """Return two line traces (Offense/Defense) that draw arrows as polylines."""
+    traces: List[go.Scatter] = []
+    head_ang = math.radians(VELOCITY_HEAD_DEG)
+
+    for team in ["Offense", "Defense"]:
+        sub = df_frame[df_frame["team"] == team]
+        if sub.empty:
             continue
-        L = min(VELOCITY_MAX_LEN, mag * VELOCITY_SCALE)
-        if L <= 0:
-            continue
-        dx = (vx / (mag + 1e-9)) * L
-        dy = (vy / (mag + 1e-9)) * L
-        x0 = float(row["x"])
-        y0 = float(row["y"])
-        x1 = x0 + dx
-        y1 = y0 + dy
-        team = str(row.get("team", "Offense"))
-        color = COLOR_MAP.get(team, "#333")
-        annots.append(
-            dict(
-                xref="x", yref="y", axref="x", ayref="y",
-                x=x1, y=y1, ax=x0, ay=y0,
-                showarrow=True,
-                arrowhead=VELOCITY_ARROWHEAD,
-                arrowsize=VELOCITY_ARROWSIZE,
-                arrowwidth=VELOCITY_LINE_W,
-                arrowcolor=color,
-                opacity=0.95,
+
+        xs: List[float] = []
+        ys: List[float] = []
+        for _, row in sub.iterrows():
+            vx = float(row.get("vx", 0.0))
+            vy = float(row.get("vy", 0.0))
+            mag = math.hypot(vx, vy)
+            if mag < VELOCITY_MIN_MAG:
+                continue
+
+            L = min(VELOCITY_MAX_LEN, mag * VELOCITY_SCALE)
+            if L <= 0:
+                continue
+
+            dx = (vx / (mag + 1e-9)) * L
+            dy = (vy / (mag + 1e-9)) * L
+            x0 = float(row["x"])
+            y0 = float(row["y"])
+            x1 = x0 + dx
+            y1 = y0 + dy
+
+            # Shaft
+            xs += [x0, x1, None]
+            ys += [y0, y1, None]
+
+            # Arrowhead (two short segments)
+            head_len = min(L * VELOCITY_HEAD_FRAC, VELOCITY_HEAD_MAX)
+            theta = math.atan2(dy, dx)
+            left = theta + head_ang
+            right = theta - head_ang
+
+            xs += [x1, x1 - head_len * math.cos(left), None]
+            ys += [y1, y1 - head_len * math.sin(left), None]
+            xs += [x1, x1 - head_len * math.cos(right), None]
+            ys += [y1, y1 - head_len * math.sin(right), None]
+
+        if xs:
+            traces.append(
+                go.Scattergl(
+                    x=xs, y=ys, mode="lines",
+                    line=dict(width=VELOCITY_LINE_W, color=COLOR_MAP.get(team, "#333")),
+                    hoverinfo="skip", showlegend=False,
+                )
             )
-        )
-    return annots
+    return traces
 
 
-# -------- Pitch Control (beta): fast symmetric model --------
+# --------------------------------------------------------------------------------------
+# Pitch Control (beta): fast symmetric model
+# --------------------------------------------------------------------------------------
 
 def _auto_calibrate_vmax(df_all: pd.DataFrame) -> float:
     try:
@@ -270,22 +295,17 @@ def _pitch_control_probs(
     grid_h: int = PC_GRID_H,
     vmax: float = PC_VMAX
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Returns (x_grid, y_grid, Z_offense) where Z_offense in [0,1] with shape (grid_h, grid_w).
-    Uses a fast time-to-intercept surrogate and exponentiated time decay.
-    """
+    """Returns (x_grid, y_grid, Z_offense) where Z_offense in [0,1] with shape (grid_h, grid_w)."""
     if df_frame is None or len(df_frame) < 2:
         gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
         gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
         return gx, gy, np.zeros((grid_h, grid_w), dtype=float)
 
-    # grid (centers)
     gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
     gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
-    Gx, Gy = np.meshgrid(gx, gy)                # (H,W)
-    pts = np.stack([Gx.ravel(), Gy.ravel()], axis=1)  # (N,2)
+    Gx, Gy = np.meshgrid(gx, gy)
+    pts = np.stack([Gx.ravel(), Gy.ravel()], axis=1)
 
-    # players
     xs = df_frame["x"].to_numpy(dtype=float)
     ys = df_frame["y"].to_numpy(dtype=float)
     vxs = df_frame["vx"].to_numpy(dtype=float)
@@ -300,15 +320,11 @@ def _pitch_control_probs(
 
     speeds = np.sqrt(vxs * vxs + vys * vys)
 
-    # distances to all grid points
     dx = xs[:, None] - pts[None, :, 0]
     dy = ys[:, None] - pts[None, :, 1]
     d = np.sqrt(dx * dx + dy * dy) + 1e-9
 
-    # surrogate time-to-intercept
     t = PC_TAU_REACT + np.maximum(0.0, d - speeds[:, None] * PC_TAU_ACCEL) / max(vmax, 1e-3)
-
-    # capture rates and team sums
     r = np.exp(-PC_LAMBDA * t)
     R_off = r[is_off].sum(axis=0)
     R_def = r[is_def].sum(axis=0)
@@ -383,10 +399,8 @@ def build_tracking_figure(
     # pitch control heatmap (below everything)
     if show_pc:
         if mode == "editor":
-            # Live recompute from edited positions (both teams)
             gx, gy, Z = _pitch_control_probs(df_pc_full, bounds, PC_GRID_W, PC_GRID_H, PC_VMAX)
         else:
-            # Fast cached version for playback
             gx, gy, Z = _pc_cached_for_timestamp(current_ts, df, bounds)
 
         data.append(
@@ -403,7 +417,7 @@ def build_tracking_figure(
     # voronoi (team-colored, slightly transparent)
     if show_voronoi and len(df_frame) >= 2:
         positions = df_frame[["x", "y"]].values.tolist()
-        pos_teams = df_frame["team"].tolist()  # align with positions order
+        pos_teams = df_frame["team"].tolist()
         vor = compute_voronoi(positions, bounds)
         for idx, poly in vor.items():
             if not poly:
@@ -419,6 +433,10 @@ def build_tracking_figure(
                 )
             )
 
+    # velocity (as non-draggable line traces, under shapes)
+    if show_velocity and not df_frame.empty:
+        data.extend(_velocity_quiver_traces(df_frame))
+
     # base figure + rink image
     fig = go.Figure(data=data)
     fig.add_layout_image(
@@ -432,7 +450,7 @@ def build_tracking_figure(
     )
     fig.update_layout(
         autosize=True,
-        uirevision="static",  # keep view stable across updates
+        uirevision="static",
         showlegend=False,
         title=None,
         xaxis=dict(range=[bounds["x_min"], bounds["x_max"]], showgrid=False, zeroline=False, visible=False),
@@ -443,7 +461,7 @@ def build_tracking_figure(
         hovermode="closest",
     )
 
-    # players + velocity arrows
+    # players + jersey numbers (annotations) + draggable circles only in editor
     if show_players and not df_frame.empty:
         if mode == "editor" and edits_enabled:
             shapes = []
@@ -469,16 +487,15 @@ def build_tracking_figure(
                             line=dict(color="white", width=1),
                         )
                     )
+                    # jersey number as non-interactive annotation
                     annotations.append(
                         dict(
                             x=x, y=y, xref="x", yref="y",
                             text=pid, showarrow=False,
                             font=dict(color="white", size=12, family="Inter, Arial"),
+                            captureevents=False,
                         )
                     )
-            # velocity arrows (added to the same annotations list)
-            if show_velocity:
-                annotations.extend(_velocity_annotations(df_frame))
             fig.update_layout(shapes=shapes, annotations=annotations)
         else:
             for team in ["Offense", "Defense"]:
@@ -493,8 +510,6 @@ def build_tracking_figure(
                         showlegend=False,
                     )
                 )
-            if show_velocity:
-                fig.update_layout(annotations=_velocity_annotations(df_frame))
 
     return fig, shape_index_map
 
@@ -817,10 +832,12 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     df_frame_full = _apply_edits_to_frame(df_frame_full, edits_for_ts)
     df_frame_for_display = df_frame_full.copy()
 
-    # Trails (apply edits to trails only in editor)
+    # Flags
     show_trails = "trails" in (overlay_values or [])
     show_velocity = "velocity" in (overlay_values or [])
     show_pc = "pc" in (overlay_values or [])
+
+    # Trails (apply edits to trails only in editor)
     trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
     if trails_df is not None and mode == "editor":
         trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
@@ -841,6 +858,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
         edits_enabled=True,
     )
 
+    # Graph config: enable only SHAPE drag; block annotation drag
     if mode == "editor" and ("players" in (overlay_values or [])):
         cfg = {
             "responsive": True,
@@ -848,7 +866,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
             "editable": True,
             "edits": {
                 "shapePosition": True,
-                "annotationPosition": False,
+                "annotationPosition": False,  # annotations (jersey numbers) not draggable
                 "annotationText": False,
                 "titleText": False,
                 "axisTitleText": False,
