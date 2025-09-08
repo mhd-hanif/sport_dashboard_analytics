@@ -657,7 +657,7 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                             {"label": "Show Trails", "value": "trails"},
                                             {"label": "Show Voronoi", "value": "voronoi"},
                                             {"label": "Show Velocity", "value": "velocity"},
-                                            {"label": "Pitch Control (beta)", "value": "pc"},
+                                            {"label": "Pitch Control", "value": "pc"},
                                             {"label": "Coverage Control (soon)", "value": "coverage", "disabled": True},
                                             {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
                                         ],
