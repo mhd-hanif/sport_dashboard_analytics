@@ -514,7 +514,6 @@ def build_tracking_figure(
         if trails_df is not None:
             trails_df = trails_df[trails_df["team"] == keep]
         if coverage_df is not None:
-            # only keep defenders that are in the displayed frame after team filter
             shown_def_pids = set(df_frame[df_frame["team"] == "Defense"]["player_id"].astype(str).tolist())
             coverage_df = coverage_df[coverage_df["player_id"].astype(str).isin(shown_def_pids)]
 
@@ -572,12 +571,10 @@ def build_tracking_figure(
 
     # coverage control (connectors + ghost defenders)
     if show_coverage and coverage_df is not None and not coverage_df.empty:
-        # make sure we join with actual defenders displayed (after team filter above)
         cur_defs = df_frame[df_frame["team"] == "Defense"][["player_id", "x", "y"]].copy()
         cur_defs["player_id"] = cur_defs["player_id"].astype(str)
         cov = coverage_df.merge(cur_defs, on="player_id", how="inner", suffixes=("_sug", "_act"))
         if not cov.empty:
-            # connectors
             xs, ys = [], []
             for _, r in cov.iterrows():
                 xs += [float(r["x"]), float(r["sug_x"]), None]
@@ -589,7 +586,6 @@ def build_tracking_figure(
                     opacity=0.9, hoverinfo="skip", showlegend=False
                 )
             )
-            # ghost suggested spots
             data.append(
                 go.Scatter(
                     x=cov["sug_x"], y=cov["sug_y"],
@@ -651,7 +647,6 @@ def build_tracking_figure(
                             line=dict(color="white", width=1),
                         )
                     )
-                    # jersey number as non-interactive annotation
                     annotations.append(
                         dict(
                             x=x, y=y, xref="x", yref="y",
@@ -1124,19 +1119,29 @@ def edits_manager(relayout, time_idx, mode, overlays, shape_map, ts_list, edits_
 
 # ---------------------- Clientside small helpers ----------------------
 
+# FIX: also pause video when mode switches to "editor" (even if loop is ON)
 app.clientside_callback(
     """
-    function(cmd, speedVal, loopVals, _poll) {
+    function(cmd, speedVal, loopVals, modeVal, _poll) {
         const video = document.getElementById("video-player");
         const state = {playing: false, ended: false};
 
         if (!video) { return state; }
 
+        // Always pause when entering editor mode (prevents looped videos from continuing)
+        try {
+            if (modeVal === "editor") {
+                video.pause();
+            }
+        } catch (e) {}
+
+        // Speed / Loop - must NOT start playback
         if (speedVal !== undefined && speedVal !== null) {
             try { video.playbackRate = Number(speedVal) || 1.0; } catch (e) {}
         }
         try { video.loop = Array.isArray(loopVals) && loopVals.indexOf("loop") !== -1; } catch (e) {}
 
+        // Command de-dup
         try {
             const lastTok = window.__sb_last_cmd_token || null;
             const tok = cmd && cmd.token ? String(cmd.token) : null;
@@ -1155,6 +1160,7 @@ app.clientside_callback(
             }
         } catch (e) {}
 
+        // Report state
         try {
             state.ended = !!video.ended;
             state.playing = !(video.paused || video.ended);
@@ -1167,6 +1173,7 @@ app.clientside_callback(
     [Input("video-ctrl", "data"),
      Input("speed-dropdown", "value"),
      Input("loop-toggle", "value"),
+     Input("mode-selector", "value"),     # <— added to force pause on mode change
      Input("video-poll", "n_intervals")],
 )
 
