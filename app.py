@@ -1,7 +1,10 @@
 """
 Sunbears Sports Analytics Dashboard (Dash)
 
-- Loads hockey tracking from two CSVs (Defense/Offense)
+- Loads hockey tracking from ONE CSV (players_tracking.csv) with team_id
+  • Required columns: timestamp (or timeframe), player_id, x, y, team_id
+  • Optional columns: vx, vy
+  • team_id convention: 0 = Defense, nonzero = Offense
 - Top row: Digital Tracking (Plotly) + Video in proportional, rounded cards
 - Unified bottom "suite" (single rounded container):
   • Centered toolbar: [Mode selector] | Prev / Play / Next / Speed / Loop + frame readout (right)
@@ -43,11 +46,10 @@ from utils import compute_voronoi  # Voronoi + clipping
 # --------------------------------------------------------------------------------------
 
 # Files
-DEFENSIVE_CSV = "assets/defensive_players_with_velocity.csv"
-OFFENSIVE_CSV = "assets/offensive_players_with_velocity.csv"
-VIDEO_FILENAME = "sample_video.mp4"   # place under ./assets/ (optional)
-FIELD_IMAGE = "field_hockey.png"      # rink image under ./assets/
-ICON_IMAGE = "sunbears_icon.webp"     # header icon under ./assets/
+TRACKING_CSV = "assets/players_tracking.csv"   # merged input with team_id (0=Defense, else Offense)
+VIDEO_FILENAME = "sample_video.mp4"            # place under ./assets/ (optional)
+FIELD_IMAGE = "field_hockey.png"               # rink image under ./assets/
+ICON_IMAGE = "sunbears_icon.webp"              # header icon under ./assets/
 
 # Rink bounds (match your data)
 RINK_BOUNDS: Dict[str, float] = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_max": 30.0}
@@ -120,52 +122,71 @@ BASE_INTERVAL_MS = 100.0
 # Data loading
 # --------------------------------------------------------------------------------------
 
-def load_tracking_data(def_path: str, off_path: str) -> pd.DataFrame:
-    """Read both CSVs, normalize columns, add team labels, sort by time.
-       vx, vy are optional; filled with 0 if missing."""
-    def _read_and_normalize(p: str, label: str) -> pd.DataFrame:
-        df = pd.read_csv(p)
-        df.columns = [c.strip() for c in df.columns]
+def load_tracking_data_single(path: str) -> pd.DataFrame:
+    """
+    Read merged CSV, normalize columns, derive 'team' from team_id (0=Defense, else Offense).
+    Accepts:
+      - 'timestamp' or 'timeframe' (cast to int)
+      - 'player_id', 'x', 'y' (required)
+      - 'vx', 'vy' (optional -> default to 0.0)
+      - 'team_id' (required -> 0=Defense, else Offense)
+    Returns canonical columns:
+      ['timestamp','player_id','team','x','y','vx','vy']
+    """
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
 
-        # Map timeframe->timestamp; keep player_id, x, y, vx, vy (optional)
-        col_map: Dict[str, str] = {}
-        for c in df.columns:
-            lc = c.lower()
-            if lc == "timeframe":
-                col_map[c] = "timestamp"
-            elif lc in {"timestamp", "player_id", "x", "y", "vx", "vy"}:
-                col_map[c] = lc
-        if col_map:
-            df.rename(columns=col_map, inplace=True)
+    # Rename timeframe -> timestamp
+    col_map: Dict[str, str] = {}
+    for c in df.columns:
+        lc = c.lower()
+        if lc == "timeframe":
+            col_map[c] = "timestamp"
+        elif lc in {"timestamp", "player_id", "x", "y", "vx", "vy", "team_id", "team"}:
+            col_map[c] = lc
+    if col_map:
+        df.rename(columns=col_map, inplace=True)
 
-        required = {"timestamp", "player_id", "x", "y"}
-        missing = required - set(df.columns)
-        if missing:
-            raise ValueError(f"Missing columns in {label} data: {missing}. Found: {list(df.columns)}")
+    required = {"timestamp", "player_id", "x", "y"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns in tracking data: {missing}. Found: {list(df.columns)}")
 
-        # Optional velocity columns
-        if "vx" not in df.columns:
-            df["vx"] = 0.0
-        if "vy" not in df.columns:
-            df["vy"] = 0.0
+    # Velocity optional
+    if "vx" not in df.columns:
+        df["vx"] = 0.0
+    if "vy" not in df.columns:
+        df["vy"] = 0.0
 
-        df["timestamp"] = df["timestamp"].astype(int)
-        df["player_id"] = df["player_id"].astype(str)
-        df["x"] = df["x"].astype(float)
-        df["y"] = df["y"].astype(float)
-        df["vx"] = df["vx"].astype(float)
-        df["vy"] = df["vy"].astype(float)
-        df["team"] = label
-        return df[["timestamp", "player_id", "team", "x", "y", "vx", "vy"]]
+    # team_id required (primary) or fallback to 'team' textual
+    if "team_id" not in df.columns:
+        if "team" not in df.columns:
+            raise ValueError("Merged tracking file must include 'team_id' (0=Defense, else Offense) or a 'team' label.")
+        # Fallback: textual 'team' -> 0/1 best-effort
+        t_lower = df["team"].astype(str).str.strip().str.lower()
+        df["team_id"] = np.where(t_lower.eq("defense") | t_lower.eq("defensive") | t_lower.eq("def"), 0, 1)
 
-    def_df = _read_and_normalize(def_path, "Defense")
-    off_df = _read_and_normalize(off_path, "Offense")
+    # Types
+    df["timestamp"] = df["timestamp"].astype(int)
+    df["player_id"] = df["player_id"].astype(str)
+    df["x"] = df["x"].astype(float)
+    df["y"] = df["y"].astype(float)
+    df["vx"] = df["vx"].astype(float)
+    df["vy"] = df["vy"].astype(float)
 
-    df = pd.concat([def_df, off_df], ignore_index=True).sort_values(
-        ["timestamp", "team", "player_id"], kind="mergesort"
-    )
-    df.reset_index(drop=True, inplace=True)
-    return df
+    # Normalize team from team_id
+    def _to_int_safe(v):
+        try:
+            return int(float(v))
+        except Exception:
+            return 1  # treat unknown as Offense
+    team_id_int = df["team_id"].apply(_to_int_safe)
+    df["team"] = np.where(team_id_int == 0, "Defense", "Offense")
+
+    out = df[["timestamp", "player_id", "team", "x", "y", "vx", "vy"]].copy()
+    out.sort_values(["timestamp", "team", "player_id"], kind="mergesort", inplace=True)
+    out.reset_index(drop=True, inplace=True)
+    return out
 
 
 # --------------------------------------------------------------------------------------
@@ -845,10 +866,10 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
 
 Path("assets").mkdir(exist_ok=True)
 
-if not Path(DEFENSIVE_CSV).exists() or not Path(OFFENSIVE_CSV).exists():
-    raise FileNotFoundError(f"CSV files not found:\n - {DEFENSIVE_CSV}\n - {OFFENSIVE_CSV}")
+if not Path(TRACKING_CSV).exists():
+    raise FileNotFoundError(f"CSV file not found: {TRACKING_CSV}")
 
-df = load_tracking_data(DEFENSIVE_CSV, OFFENSIVE_CSV)
+df = load_tracking_data_single(TRACKING_CSV)
 timestamps = sorted(df["timestamp"].unique())
 if not timestamps:
     raise RuntimeError("No timestamps found in tracking data.")
@@ -1173,7 +1194,7 @@ app.clientside_callback(
     [Input("video-ctrl", "data"),
      Input("speed-dropdown", "value"),
      Input("loop-toggle", "value"),
-     Input("mode-selector", "value"),     # <— added to force pause on mode change
+     Input("mode-selector", "value"),
      Input("video-poll", "n_intervals")],
 )
 
