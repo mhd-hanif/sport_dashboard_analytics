@@ -693,12 +693,8 @@ def build_tracking_figure(
 
     return fig, shape_index_map
 
-
-# --------------------------------------------------------------------------------------
-# UI builders
-# --------------------------------------------------------------------------------------
-
 def build_header() -> html.Div:
+    # Header row: icon + texts | spacer | Import button (top-right)
     return html.Div(
         [
             html.Div(
@@ -710,6 +706,14 @@ def build_header() -> html.Div:
                             html.Div("Digital Tracking • Analytics • Playback", className="sb-header__subtitle"),
                         ],
                         className="sb-header__texts",
+                    ),
+                    html.Div(className="sb-header__spacer"),  # pushes the import button to the right
+                    html.Button(
+                        "Import Data",
+                        id="btn-import",
+                        className="sb-btn sb-btn--primary sb-btn--import",
+                        title="(Coming soon) Import tracking CSV & video for analysis",
+                        n_clicks=0,
                     ),
                 ],
                 className="sb-header__row",

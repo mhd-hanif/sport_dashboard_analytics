@@ -9,6 +9,8 @@
 .sb-header__texts { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
 .sb-header__title { margin: 0 0 4px 0; font-weight: 700; color: #0d67b6; line-height: 1.1; font-size: 28px; }
 .sb-header__subtitle { color: #6b7280; font-size: 14px; }
+/* Push actions to the right */
+.sb-header__spacer { flex: 1 1 auto; }
 
 /* ---------- Top row grid ---------- */
 .sb-grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 18px 0; }
@@ -62,11 +64,22 @@
 }
 .sb-btn {
   padding: 8px 12px; border-radius: 10px; border: 1px solid #d1d5db; background: #fff;
-  box-shadow: 0 1px 0 rgba(0,0,0,0.03); cursor: pointer;
+  box-shadow: 0 1px 0 rgba(0,0,0,0.03); cursor: pointer; transition: box-shadow .15s ease, transform .03s ease, background .15s ease, border-color .15s ease;
 }
 .sb-btn:hover { border-color: #b6c2cf; }
+.sb-btn:active { transform: translateY(1px); }
 .sb-btn[disabled] { opacity: 0.55; cursor: not-allowed; }
 
+/* Primary button (used for Import Data) */
+.sb-btn--primary {
+  background: #0d67b6; border-color: #0d67b6; color: #fff; font-weight: 600;
+  box-shadow: 0 6px 14px rgba(13,103,182,0.25);
+}
+.sb-btn--primary:hover { background: #0b5aa0; border-color: #0b5aa0; }
+.sb-btn--primary:focus { outline: none; box-shadow: 0 0 0 3px rgba(13,103,182,0.2); }
+.sb-btn--import { padding: 10px 14px; }
+
+/* Dropdown tweaks */
 .sb-speed .Select-control, .sb-speed .Select__control { border-radius: 10px; }
 
 .sb-chip-toggle label {
