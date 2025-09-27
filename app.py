@@ -33,25 +33,22 @@ import math
 import numpy as np
 import dash
 from dash import html, dcc, Dash
-from dash.dependencies import Input, Output, State
+from dash.dependencies import Input, Output, State, ALL
 import dash.exceptions
 import pandas as pd
 import plotly.graph_objs as go
 
 from utils import compute_voronoi  # Voronoi + clipping
 
-
 # --------------------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------------------
 
-# Files
-# TRACKING_CSV = "assets/players_tracking.csv"   # merged input with team_id (0=Defense, else Offense)
+# Files (defaults at startup)
 TRACKING_CSV = "assets/clip_scene/scene_5.csv"   # merged input with team_id (0=Defense, else Offense)
-# VIDEO_FILENAME = "sample_video.mp4"            # place under ./assets/ (optional)
-VIDEO_FILENAME = "clip_scene/scene_5.mp4"            # place under ./assets/ (optional)
-FIELD_IMAGE = "field_hockey.png"               # rink image under ./assets/
-ICON_IMAGE = "sunbears_icon.webp"              # header icon under ./assets/
+VIDEO_FILENAME = "clip_scene/scene_5.mp4"        # path under ./assets/
+FIELD_IMAGE = "field_hockey.png"                 # rink image under ./assets/
+ICON_IMAGE = "sunbears_icon.webp"                # header icon under ./assets/
 
 # Rink bounds (match your data)
 RINK_BOUNDS: Dict[str, float] = {"x_min": 0.0, "x_max": 61.0, "y_min": 0.0, "y_max": 30.0}
@@ -77,8 +74,8 @@ PC_GRID_W = 240
 PC_GRID_H = 120
 PC_TAU_REACT = 0.40   # s
 PC_TAU_ACCEL = 0.70   # s of "speed credit"
-# PC_LAMBDA = 1.6       # time decay -> sharper vs softer fields
-PC_LAMBDA = 3.2       # time decay -> sharper vs softer fields
+# PC_LAMBDA = 1.6
+PC_LAMBDA = 3.2       # sharper fields
 PC_OPACITY = 0.50     # heatmap opacity
 PC_VMAX_FALLBACK = 5.0
 PC_VMAX: float = PC_VMAX_FALLBACK
@@ -86,16 +83,14 @@ PC_VMAX: float = PC_VMAX_FALLBACK
 _PC_CACHE: Dict[int, np.ndarray] = {}
 
 # -------- Coverage Control (beta) styling/params --------
-# Simple “mark the nearest attacker, stand between target & goal with a small standoff”
-COV_STANDOFF = 3.0            # meters toward our goal from anticipated attacker point
-COV_VEL_GAIN = 0.8            # anticipation = pos + gain * vel
-COV_EMA_ALPHA = 0.35          # smoothing for playback cache
-COV_MAX_STEP = 1.0            # step cap per frame in the EMA path
+COV_STANDOFF = 3.0
+COV_VEL_GAIN = 0.8
+COV_EMA_ALPHA = 0.35
+COV_MAX_STEP = 1.0
 COV_GHOST_SIZE = 16
-COV_GHOST_COLOR = "rgba(46,134,222,0.42)"  # semi-transparent defense blue
+COV_GHOST_COLOR = "rgba(46,134,222,0.42)"
 COV_CONNECTOR_COLOR = "rgba(46,134,222,0.7)"
 COV_CONNECTOR_WIDTH = 2
-# Cached suggested positions per timestamp for smooth playback
 _COV_CACHE: Dict[int, pd.DataFrame] = {}
 
 STYLES: Dict[str, Any] = {
@@ -166,7 +161,6 @@ def load_tracking_data_single(path: str) -> pd.DataFrame:
     if "team_id" not in df.columns:
         if "team" not in df.columns:
             raise ValueError("Merged tracking file must include 'team_id' (0=Defense, else Offense) or a 'team' label.")
-        # Fallback: textual 'team' -> 0/1 best-effort
         t_lower = df["team"].astype(str).str.strip().str.lower()
         df["team_id"] = np.where(t_lower.eq("defense") | t_lower.eq("defensive") | t_lower.eq("def"), 0, 1)
 
@@ -219,7 +213,6 @@ def _aspect_padding_from_bounds(bounds: Dict[str, float]) -> str:
 
 
 def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
-    """Apply per-frame edited positions to a single-frame dataframe."""
     if not edits_for_ts:
         return df_frame
     df_frame = df_frame.copy()
@@ -233,7 +226,6 @@ def _apply_edits_to_frame(df_frame: pd.DataFrame, edits_for_ts: Dict[str, Dict[s
 
 
 def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any]) -> pd.DataFrame:
-    """Optionally reflect edited positions on the recent trail segment for visual continuity."""
     if not isinstance(edits_store, dict) or trails_df.empty:
         return trails_df
     trails_df = trails_df.copy()
@@ -257,7 +249,6 @@ def _apply_edits_to_trails(trails_df: pd.DataFrame, edits_store: Dict[str, Any])
 
 # ---------- Velocity as NON-DRAGGABLE quiver line traces ----------
 def _velocity_quiver_traces(df_frame: pd.DataFrame) -> List[go.Scatter]:
-    """Return two line traces (Offense/Defense) that draw arrows as polylines."""
     traces: List[go.Scatter] = []
     head_ang = math.radians(VELOCITY_HEAD_DEG)
 
@@ -290,7 +281,7 @@ def _velocity_quiver_traces(df_frame: pd.DataFrame) -> List[go.Scatter]:
             xs += [x0, x1, None]
             ys += [y0, y1, None]
 
-            # Arrowhead (two short segments)
+            # Arrowhead
             head_len = min(L * VELOCITY_HEAD_FRAC, VELOCITY_HEAD_MAX)
             theta = math.atan2(dy, dx)
             left = theta + head_ang
@@ -334,7 +325,6 @@ def _pitch_control_probs(
     grid_h: int = PC_GRID_H,
     vmax: float = PC_VMAX
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Returns (x_grid, y_grid, Z_offense) where Z_offense in [0,1] with shape (grid_h, grid_w)."""
     if df_frame is None or len(df_frame) < 2:
         gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
         gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
@@ -358,7 +348,6 @@ def _pitch_control_probs(
         return gx, gy, Z
 
     speeds = np.sqrt(vxs * vxs + vys * vys)
-
     dx = xs[:, None] - pts[None, :, 0]
     dy = ys[:, None] - pts[None, :, 1]
     d = np.sqrt(dx * dx + dy * dy) + 1e-9
@@ -373,7 +362,6 @@ def _pitch_control_probs(
 
 
 def _pc_cached_for_timestamp(ts: int, df_all: pd.DataFrame, bounds: Dict[str, float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Cache pitch control per timestamp for speed (used in playback mode)."""
     if ts in _PC_CACHE:
         Z = _PC_CACHE[ts]
         gx = np.linspace(bounds["x_min"], bounds["x_max"], PC_GRID_W)
@@ -387,24 +375,16 @@ def _pc_cached_for_timestamp(ts: int, df_all: pd.DataFrame, bounds: Dict[str, fl
 
 
 # --------------------------------------------------------------------------------------
-# Coverage Control (beta): simple nearest-mark + goal-line standoff
+# Coverage Control (beta)
 # --------------------------------------------------------------------------------------
 
 def _goal_point(bounds: Dict[str, float]) -> Tuple[float, float]:
-    """Assume own goal for Defense on the left side."""
     gx = bounds["x_min"]
     gy = (bounds["y_min"] + bounds["y_max"]) / 2.0
     return gx, gy
 
 
 def _instant_coverage_for_frame(df_frame: pd.DataFrame, bounds: Dict[str, float]) -> pd.DataFrame:
-    """
-    Compute instantaneous suggested positions for Defense only, based on:
-      - Assign each defender to nearest attacker
-      - Anticipate attacker (pos + gain*vel)
-      - Place defender on line (goal -> anticipated attacker), with a standoff toward goal
-    Returns DataFrame [player_id, team='Defense', sug_x, sug_y].
-    """
     if df_frame is None or df_frame.empty:
         return pd.DataFrame(columns=["player_id", "team", "sug_x", "sug_y"])
 
@@ -415,7 +395,6 @@ def _instant_coverage_for_frame(df_frame: pd.DataFrame, bounds: Dict[str, float]
     if defs.empty:
         return pd.DataFrame(columns=["player_id", "team", "sug_x", "sug_y"])
 
-    # No attackers: slight nudge toward goal
     if offs.empty:
         vecx = gx - defs["x"].to_numpy(float)
         vecy = gy - defs["y"].to_numpy(float)
@@ -445,11 +424,11 @@ def _instant_coverage_for_frame(df_frame: pd.DataFrame, bounds: Dict[str, float]
 
     for di in range(D.shape[0]):
         j = def_to_off[di]
-        target = O[j] + COV_VEL_GAIN * OV[j]            # anticipate
+        target = O[j] + COV_VEL_GAIN * OV[j]
         g2t = target - g
         n = np.linalg.norm(g2t) + 1e-9
         dir_g2t = g2t / n
-        sug = target - dir_g2t * COV_STANDOFF           # toward goal from target
+        sug = target - dir_g2t * COV_STANDOFF
         sug[0] = np.clip(sug[0], bounds["x_min"], bounds["x_max"])
         sug[1] = np.clip(sug[1], bounds["y_min"], bounds["y_max"])
         sug_x[di], sug_y[di] = float(sug[0]), float(sug[1])
@@ -461,9 +440,8 @@ def _instant_coverage_for_frame(df_frame: pd.DataFrame, bounds: Dict[str, float]
 
 
 def _precompute_coverage_cache(df_all: pd.DataFrame, timestamps: List[int], bounds: Dict[str, float]) -> Dict[int, pd.DataFrame]:
-    """Precompute smoothed suggestions (EMA + capped step) for smooth playback."""
     cache: Dict[int, pd.DataFrame] = {}
-    prev: Dict[str, Tuple[float, float]] = {}  # player_id -> (x, y)
+    prev: Dict[str, Tuple[float, float]] = {}
 
     for ts in timestamps:
         frame = df_all[df_all["timestamp"] == ts]
@@ -504,8 +482,8 @@ def _precompute_coverage_cache(df_all: pd.DataFrame, timestamps: List[int], boun
 # --------------------------------------------------------------------------------------
 
 def build_tracking_figure(
-    df_frame_for_display: pd.DataFrame,           # may be team-filtered
-    df_frame_for_pc_full: pd.DataFrame,           # both teams, edited if in editor
+    df_frame_for_display: pd.DataFrame,
+    df_frame_for_pc_full: pd.DataFrame,
     trails_df: Optional[pd.DataFrame],
     bounds: Dict[str, float],
     team_filter: str,
@@ -520,11 +498,6 @@ def build_tracking_figure(
     mode: str,
     edits_enabled: bool,
 ) -> Tuple[go.Figure, List[str]]:
-    """
-    Returns (figure, shape_index_map).
-    - In Playback mode: players are scatter markers (not draggable), shape_index_map = []
-    - In Editor mode with players visible: players are draggable circle shapes; shape_index_map maps index -> "Team|player_id"
-    """
     data: List[go.Scatter] = []
     shape_index_map: List[str] = []
 
@@ -571,7 +544,7 @@ def build_tracking_figure(
             )
         )
 
-    # voronoi (team-colored, slightly transparent)
+    # voronoi
     if show_voronoi and len(df_frame) >= 2:
         positions = df_frame[["x", "y"]].values.tolist()
         pos_teams = df_frame["team"].tolist()
@@ -590,7 +563,7 @@ def build_tracking_figure(
                 )
             )
 
-    # velocity (as non-draggable line traces, under shapes)
+    # velocity
     if show_velocity and not df_frame.empty:
         data.extend(_velocity_quiver_traces(df_frame))
 
@@ -646,7 +619,7 @@ def build_tracking_figure(
         hovermode="closest",
     )
 
-    # players + jersey numbers (annotations) + draggable circles only in editor
+    # players + labels / draggable in editor
     if show_players and not df_frame.empty:
         if mode == "editor" and edits_enabled:
             shapes = []
@@ -697,8 +670,12 @@ def build_tracking_figure(
 
     return fig, shape_index_map
 
+
+# --------------------------------------------------------------------------------------
+# UI builders
+# --------------------------------------------------------------------------------------
+
 def build_header() -> html.Div:
-    # Header row: icon + texts | spacer | Import button (top-right)
     return html.Div(
         [
             html.Div(
@@ -711,12 +688,12 @@ def build_header() -> html.Div:
                         ],
                         className="sb-header__texts",
                     ),
-                    html.Div(className="sb-header__spacer"),  # pushes the import button to the right
+                    html.Div(className="sb-header__spacer"),
                     html.Button(
                         "Import Data",
-                        id="btn-import",
+                        id={"role": "import", "action": "open"},
                         className="sb-btn sb-btn--primary sb-btn--import",
-                        title="(Coming soon) Import tracking CSV & video for analysis",
+                        title="Import tracking CSV & matching MP4 (same scene name)",
                         n_clicks=0,
                     ),
                 ],
@@ -888,7 +865,7 @@ PC_VMAX = _auto_calibrate_vmax(df)
 # Precompute coverage suggestions for smooth playback
 _COV_CACHE = _precompute_coverage_cache(df, timestamps, RINK_BOUNDS)
 
-app: Dash = dash.Dash(__name__)
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
 server = app.server
 
 app.title = "Sunbears Dashboard"
@@ -896,18 +873,67 @@ app.layout = html.Div(
     [
         build_header(),
         html.Div([build_top_row(RINK_BOUNDS), build_bottom_panel(timestamps)], className="sb-container"),
-        dcc.Interval(id="play-interval", interval=int(BASE_INTERVAL_MS), disabled=True),
-        dcc.Interval(id="video-poll", interval=500, n_intervals=0),
+        
+        # Modal placeholder
+        html.Div(id="import-modal-container"),
+        
+        # Stores
         dcc.Store(id="is-playing", data=False),
         dcc.Store(id="timestamps", data=timestamps),
         dcc.Store(id="edits-store", data={}),
         dcc.Store(id="shape-index-map", data=[]),
         dcc.Store(id="video-ctrl", data=None),
         dcc.Store(id="video-state", data={"playing": False, "ended": False}),
+        dcc.Store(id="dataset-info", data={"csv": TRACKING_CSV, "video": f"assets/{VIDEO_FILENAME}"}),
+
+        # Intervals
+        dcc.Interval(id="play-interval", interval=int(BASE_INTERVAL_MS), disabled=True),
+        dcc.Interval(id="video-poll", interval=500, n_intervals=0),
     ],
     className="sb-page",
     style=STYLES["page"],
 )
+
+
+# --------------------------------------------------------------------------------------
+# Import Modal UI helper
+# --------------------------------------------------------------------------------------
+
+def build_import_modal():
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.H3("Import New Dataset", className="sb-modal__title"),
+                    html.Label("Folder Path:"),
+                    dcc.Input(
+                        id={"role": "import", "field": "folder"},
+                        type="text",
+                        placeholder="e.g., assets/clip_scene",
+                        value="assets/clip_scene",
+                        className="sb-input",
+                    ),
+                    html.Label("Scene Name:"),
+                    dcc.Input(
+                        id={"role": "import", "field": "scene"},
+                        type="text",
+                        placeholder="e.g., scene_12",
+                        className="sb-input",
+                    ),
+                    html.Div(id="import-error", className="sb-error"),
+                    html.Div(
+                        [
+                            html.Button("Cancel", id={"role": "import", "action": "cancel"}, className="sb-btn"),
+                            html.Button("Confirm", id={"role": "import", "action": "confirm"}, className="sb-btn sb-btn--primary"),
+                        ],
+                        className="sb-modal__actions",
+                    ),
+                ],
+                className="sb-modal__content",
+            )
+        ],
+        className="sb-modal",
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -923,9 +949,11 @@ def set_speed(rate):
         rate = 1.0
     return int(max(20, BASE_INTERVAL_MS / rate))
 
+
 @app.callback(Output("btn-play", "disabled"), Input("mode-selector", "value"))
 def toggle_play_disabled(mode):
     return mode == "editor"
+
 
 @app.callback(
     Output("time-slider-main", "value"),
@@ -1000,6 +1028,18 @@ def update_readout(idx, ts_list):
     return f"Frame {idx} / {len(ts_list) - 1}"
 
 
+# Adjust slider bounds when timestamps change (after import)
+@app.callback(
+    Output("time-slider-main", "max"),
+    Output("time-slider-main", "min"),
+    Input("timestamps", "data"),
+)
+def adjust_slider_bounds(ts_list):
+    if not ts_list:
+        raise dash.exceptions.PreventUpdate
+    return len(ts_list) - 1, 0
+
+
 @app.callback(
     Output("tracking-graph", "figure"),
     Output("shape-index-map", "data"),
@@ -1018,7 +1058,6 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     # Current frame data (full, both teams)
     df_frame_full = df[df["timestamp"] == current_timestamp].copy()
 
-    # Apply per-frame edits to BOTH: (a) full frame for PC/Coverage; (b) display frame (team filter applied later)
     edits_for_ts = (edits_store or {}).get(ts_key, {}) if mode == "editor" else {}
     df_frame_full = _apply_edits_to_frame(df_frame_full, edits_for_ts)
     df_frame_for_display = df_frame_full.copy()
@@ -1029,7 +1068,7 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     show_pc = "pc" in (overlay_values or [])
     show_coverage = "coverage" in (overlay_values or [])
 
-    # Trails (apply edits to trails only in editor)
+    # Trails
     trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
     if trails_df is not None and mode == "editor":
         trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
@@ -1139,16 +1178,105 @@ def edits_manager(relayout, time_idx, mode, overlays, shape_map, ts_list, edits_
             continue
         cx = (bbox["x0"] + bbox["x1"]) / 2.0
         cy = (bbox["y0"] + bbox["y1"]) / 2.0
-        key = shape_map[idx]             # "Team|player_id"
+        key = shape_map[idx]  # "Team|player_id"
         team = key.split("|", 1)[0]
         edits_store[ts_key][key] = {"x": float(cx), "y": float(cy), "team": team}
 
     return edits_store
 
 
+# ---------------------- Import Modal & Dataset Switching ----------------------
+
+# One callback handles open/cancel via pattern matching (no missing-ID errors)
+@app.callback(
+    Output("import-modal-container", "children"),
+    Input({"role": "import", "action": ALL}, "n_clicks"),
+    State("import-modal-container", "children"),
+    prevent_initial_call=True
+)
+def toggle_import_modal(btn_clicks, modal_children):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        raise dash.exceptions.PreventUpdate
+    trig = ctx.triggered[0]["prop_id"]  # e.g. {"role":"import","action":"open"}.n_clicks
+
+    if '"open"' in trig:
+        return build_import_modal()
+    if '"cancel"' in trig:
+        return None
+    return modal_children
+
+
+# Perform import on confirm
+@app.callback(
+    Output("dataset-info", "data", allow_duplicate=True),
+    Output("timestamps", "data", allow_duplicate=True),
+    Output("time-slider-main", "value", allow_duplicate=True),
+    Output("import-error", "children", allow_duplicate=True),
+    Output("import-modal-container", "children", allow_duplicate=True),
+    Input({"role": "import", "action": "confirm"}, "n_clicks"),
+    State({"role": "import", "field": "folder"}, "value"),
+    State({"role": "import", "field": "scene"}, "value"),
+    prevent_initial_call=True,
+)
+def process_import(confirm_click, folder, scene_name):
+    if not confirm_click:
+        raise dash.exceptions.PreventUpdate
+
+    if not scene_name or not folder:
+        return dash.no_update, dash.no_update, dash.no_update, "Please enter both folder and scene name.", dash.no_update
+
+    folder_path = Path(folder)
+    csv_path = folder_path / f"{scene_name}.csv"
+    video_path = folder_path / f"{scene_name}.mp4"
+
+    if not csv_path.exists():
+        return dash.no_update, dash.no_update, dash.no_update, f"CSV not found: {csv_path}", dash.no_update
+    if not video_path.exists():
+        return dash.no_update, dash.no_update, dash.no_update, f"Video not found: {video_path}", dash.no_update
+
+    try:
+        new_df = load_tracking_data_single(str(csv_path))
+    except Exception as e:
+        return dash.no_update, dash.no_update, dash.no_update, f"Error loading CSV: {e}", dash.no_update
+
+    new_timestamps = sorted(new_df["timestamp"].unique())
+    if not new_timestamps:
+        return dash.no_update, dash.no_update, dash.no_update, "No timestamps found in the CSV.", dash.no_update
+
+    # Update global variables & caches
+    global df, _PC_CACHE, _COV_CACHE, PC_VMAX
+    df = new_df
+    _PC_CACHE = {}
+    PC_VMAX = _auto_calibrate_vmax(df)
+    _COV_CACHE = _precompute_coverage_cache(df, new_timestamps, RINK_BOUNDS)
+
+    return (
+        {"csv": str(csv_path), "video": f"assets/{video_path.as_posix()}".replace("assets/assets/", "assets/")},
+        new_timestamps,
+        0,     # reset slider to start
+        "",    # clear any error
+        None   # close modal
+    )
+
+
+# Update video source when dataset changes
+@app.callback(
+    Output("video-player", "src"),
+    Input("dataset-info", "data"),
+)
+def update_video_src(dataset_info):
+    if not dataset_info or "video" not in dataset_info:
+        raise dash.exceptions.PreventUpdate
+    path = dataset_info["video"]
+    if not path.startswith("assets/"):
+        path = f"assets/{path}"
+    return f"/{path}"
+
+
 # ---------------------- Clientside small helpers ----------------------
 
-# FIX: also pause video when mode switches to "editor" (even if loop is ON)
+# Pause video when entering editor, manage loop/speed, and de-dupe commands
 app.clientside_callback(
     """
     function(cmd, speedVal, loopVals, modeVal, _poll) {
@@ -1157,27 +1285,18 @@ app.clientside_callback(
 
         if (!video) { return state; }
 
-        // Always pause when entering editor mode (prevents looped videos from continuing)
-        try {
-            if (modeVal === "editor") {
-                video.pause();
-            }
-        } catch (e) {}
+        try { if (modeVal === "editor") { video.pause(); } } catch (e) {}
 
-        // Speed / Loop - must NOT start playback
         if (speedVal !== undefined && speedVal !== null) {
             try { video.playbackRate = Number(speedVal) || 1.0; } catch (e) {}
         }
         try { video.loop = Array.isArray(loopVals) && loopVals.indexOf("loop") !== -1; } catch (e) {}
 
-        // Command de-dup
         try {
             const lastTok = window.__sb_last_cmd_token || null;
             const tok = cmd && cmd.token ? String(cmd.token) : null;
-
             if (cmd && cmd.action && tok && tok !== lastTok) {
                 window.__sb_last_cmd_token = tok;
-
                 if (cmd.action === "play") {
                     if (cmd.restart && (video.ended || (video.duration && video.currentTime >= video.duration - 0.01))) {
                         video.currentTime = 0;
@@ -1189,7 +1308,6 @@ app.clientside_callback(
             }
         } catch (e) {}
 
-        // Report state
         try {
             state.ended = !!video.ended;
             state.playing = !(video.paused || video.ended);
