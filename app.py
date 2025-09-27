@@ -46,8 +46,10 @@ from utils import compute_voronoi  # Voronoi + clipping
 # --------------------------------------------------------------------------------------
 
 # Files
-TRACKING_CSV = "assets/players_tracking.csv"   # merged input with team_id (0=Defense, else Offense)
-VIDEO_FILENAME = "sample_video.mp4"            # place under ./assets/ (optional)
+# TRACKING_CSV = "assets/players_tracking.csv"   # merged input with team_id (0=Defense, else Offense)
+TRACKING_CSV = "assets/clip_scene/scene_5.csv"   # merged input with team_id (0=Defense, else Offense)
+# VIDEO_FILENAME = "sample_video.mp4"            # place under ./assets/ (optional)
+VIDEO_FILENAME = "clip_scene/scene_5.mp4"            # place under ./assets/ (optional)
 FIELD_IMAGE = "field_hockey.png"               # rink image under ./assets/
 ICON_IMAGE = "sunbears_icon.webp"              # header icon under ./assets/
 
@@ -75,7 +77,8 @@ PC_GRID_W = 240
 PC_GRID_H = 120
 PC_TAU_REACT = 0.40   # s
 PC_TAU_ACCEL = 0.70   # s of "speed credit"
-PC_LAMBDA = 1.6       # time decay -> sharper vs softer fields
+# PC_LAMBDA = 1.6       # time decay -> sharper vs softer fields
+PC_LAMBDA = 3.2       # time decay -> sharper vs softer fields
 PC_OPACITY = 0.50     # heatmap opacity
 PC_VMAX_FALLBACK = 5.0
 PC_VMAX: float = PC_VMAX_FALLBACK
@@ -115,7 +118,8 @@ PC_COLORSCALE = [
 ]
 
 # Shared timer base at 1× speed (ms)
-BASE_INTERVAL_MS = 100.0
+TARGET_FPS = 28
+BASE_INTERVAL_MS = 1000.0 / TARGET_FPS
 
 
 # --------------------------------------------------------------------------------------
