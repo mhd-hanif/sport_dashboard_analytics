@@ -1,5 +1,7 @@
 # Sunbears Sports Analytics Dashboard (Dash)
 
+![Sunbears Dashboard Demo](assets/sunbears_dashboard_project.gif)
+
 Interactive hockey tracking dashboard built with **Python + Dash**.
 
 Displays player positions on a rink background, allows frame-by-frame playback, and supports overlays such as trails and Voronoi regions. Can also display a short synchronized video alongside the tracking plot.
