@@ -68,6 +68,40 @@ which needs a QP solver.
 
 Tests: `pytest tests`
 
+## Web version: Sunbears Defense Lab (`web/`)
+
+The same analytics as a static web app: plain HTML, CSS and JavaScript modules, the rink on
+Canvas, the models in Web Workers. No Python, no server code, no build step.
+
+```bash
+python -m http.server 8000        # from the repository root
+# open http://localhost:8000/web/
+```
+
+Any static host works (GitHub Pages: serve the repository root and open `/web/`). The page
+reads the bundled clips from `assets/clip_scene/`; drop your own CSV (and MP4) on the page to
+open another clip.
+
+What it adds to the Dash app:
+
+- **No modes.** Drag any player at any time; the threat, the threat surface and the suggested
+  positions follow. "Reset frame" goes back to the tracking.
+- **Puck marks.** Click an attacker to give him the puck from that moment on (click him again
+  to clear). Several marks describe a sequence of passes; the replay is recomputed.
+- **Key moments.** The moments where the reference defense concedes much less than the
+  tracked one, as jump buttons under the timeline.
+- **Per-defender numbers** (when paused): the threat each defender removes (how much the
+  threat rises without him) and his distance from his green marker.
+- **The video is the clock** when it lasts as long as the clip and the server can seek in it.
+  `python -m http.server` cannot (no byte ranges), so there the page falls back to a timer.
+
+The models in `web/js/models.js` and `web/js/engine.js` are a port of the `analytics/`
+package. `cd web && npm test` compares them with numbers exported from Python by
+`web/tests/make_golden.py` (needs Node 20 or later, no packages). Frame results agree to
+nine digits. The replay of the reference defense is a closed loop that amplifies last-digit
+differences, so it agrees exactly at the start of a clip and to within about 1% in threat
+later on.
+
 ## Repository Structure
 
 - `app.py` — Main Dash application (layout, callbacks, figure rendering)
@@ -79,6 +113,7 @@ Tests: `pytest tests`
   - `engine.py` — Per-clip engine: units, attack direction, goalies, puck carrier, replay
   - `rink.py` — Rink geometry and grids
 - `tests/` — Tests of the analytics package
+- `web/` — Static web version (`index.html`, `style.css`, `js/`, `tests/`)
 - `assets/`
   - `app.css` — Custom styling
   - `defensive_players_hockey.csv` — Example defense player tracking

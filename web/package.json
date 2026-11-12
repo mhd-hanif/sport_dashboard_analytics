@@ -1,0 +1,6 @@
+{
+  "name": "sunbears-web-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test tests/models.test.mjs" }
+}

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sunbears Defense Lab</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!--page-->
+<div class="app" id="app" data-clip-base="../assets/clip_scene/">
+  <header class="top">
+    <div class="brand">
+      <div class="brand__name">Sunbears <span>Defense Lab</span></div>
+      <div class="brand__sub">Tracking · pitch control · scoring threat · reference defense</div>
+    </div>
+    <div class="top__tools">
+      <label class="field">Clip
+        <select id="clip-select"></select>
+      </label>
+      <label class="btn btn--ghost" for="file-input">Open CSV / MP4…</label>
+      <input type="file" id="file-input" accept=".csv,.mp4,text/csv,video/mp4" multiple hidden>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <main class="stage">
+    <section class="rink-card">
+      <canvas id="rink" aria-label="Rink with players, threat and reference defense"></canvas>
+      <div class="rink-card__hud">
+        <span id="edit-badge" class="badge badge--edit" hidden>Edited frame</span>
+        <button id="reset-frame" class="btn btn--small" type="button" hidden>Reset frame</button>
+      </div>
+      <div class="hint">Drag a player to test a position. Click an attacker to give him the puck from this moment on.</div>
+    </section>
+
+    <aside class="side">
+      <div class="video-card">
+        <video id="video" muted playsinline preload="auto"></video>
+        <div id="video-empty" class="video-card__empty">No video for this clip</div>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="panel">
+        <div class="panel__title">Defenders <span class="panel__hint">threat each removes · distance from his green marker</span></div>
+        <div id="defenders" class="rows"></div>
+      </div>
+      <div class="panel">
+        <div class="panel__title">Attackers <span class="panel__hint">share of the threat</span></div>
+        <div id="attackers" class="rows"></div>
+      </div>
+    </aside>
+  </main>
+
+  <section class="deck">
+    <div class="transport">
+      <button id="btn-prev" class="btn" type="button" aria-label="Previous frame">◀</button>
+      <button id="btn-play" class="btn btn--primary" type="button">Play</button>
+      <button id="btn-next" class="btn" type="button" aria-label="Next frame">▶</button>
+      <label class="field">Speed
+        <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+      </label>
+      <label class="check"><input type="checkbox" id="loop"> Loop</label>
+      <div id="readout" class="readout"></div>
+      <div class="chips" id="overlays">
+        <label class="chip"><input type="checkbox" data-ov="threat"> Scoring threat</label>
+        <label class="chip"><input type="checkbox" data-ov="reference"> Reference defense</label>
+        <label class="chip"><input type="checkbox" data-ov="pc"> Pitch control</label>
+        <label class="chip"><input type="checkbox" data-ov="voronoi"> Voronoi</label>
+        <label class="chip"><input type="checkbox" data-ov="trails"> Trails</label>
+        <label class="chip"><input type="checkbox" data-ov="velocity"> Velocity</label>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-card__head">
+        <div class="legend">
+          <span class="legend__item"><i style="background:var(--tracked)"></i>Tracked defense</span>
+          <span class="legend__item"><i style="background:var(--ref)"></i>Reference defense</span>
+          <span class="legend__item"><i class="legend__gap"></i>Defendable threat</span>
+        </div>
+        <div id="chart-readout" class="chart-readout"></div>
+      </div>
+      <canvas id="chart" aria-label="Scoring threat over the clip"></canvas>
+      <div class="chart-card__foot">
+        <div class="moments"><span class="moments__label">Key moments</span><span id="moments"></span></div>
+        <div class="marks"><span id="marks-text"></span><button id="clear-marks" class="btn btn--small" type="button" hidden>Clear puck marks</button></div>
+      </div>
+    </div>
+    <p id="note" class="note"></p>
+  </section>
+</div>
+<!--/page-->
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
