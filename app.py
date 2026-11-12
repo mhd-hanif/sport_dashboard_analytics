@@ -13,9 +13,15 @@ Sunbears Sports Analytics Dashboard (Dash)
 - Editor Mode (ephemeral edits):
   • Playback auto-pauses, Play button disabled
   • Drag players by moving the circle (move-only; fixed radius)
-  • Voronoi & Pitch Control recompute instantly from edited positions (current frame only)
-  • Coverage Control (beta) recomputes instantly from edited positions (current frame only)
+  • Voronoi, Pitch Control and Scoring Threat recompute instantly from edited positions
+  • Reference Defense shows where pitch-control coverage would move the defenders of the frame
   • Changing frame OR switching modes clears edits; returning to a frame shows original data
+
+Defensive analytics (./analytics):
+- Pitch Control: physics-based control model (Spearman), who gets to a loose puck first
+- Scoring Threat: off-puck scoring opportunity of the attack, as a surface and as a number
+- Reference Defense: a unit driven by pitch-control coverage that replays the clip against
+  the tracked attack; the panel compares the threat it concedes with the tracked defense
 
 Sync rules in this build:
 - Play/Pause controls BOTH tracking & video
@@ -39,6 +45,7 @@ import pandas as pd
 import plotly.graph_objs as go
 
 from utils import compute_voronoi  # Voronoi + clipping
+from analytics import EngineConfig, SceneAnalytics
 
 # --------------------------------------------------------------------------------------
 # Configuration
@@ -69,29 +76,34 @@ VELOCITY_HEAD_FRAC = 0.35           # fraction of shaft length
 VELOCITY_HEAD_MAX  = 1.2            # cap absolute head length
 VELOCITY_HEAD_DEG  = 28.0           # head opening half-angle (deg)
 
-# -------- Pitch Control (beta) parameters --------
-PC_GRID_W = 240
-PC_GRID_H = 120
-PC_TAU_REACT = 0.40   # s
-PC_TAU_ACCEL = 0.70   # s of "speed credit"
-# PC_LAMBDA = 1.6
-PC_LAMBDA = 3.2       # sharper fields
-PC_OPACITY = 0.50     # heatmap opacity
-PC_VMAX_FALLBACK = 5.0
-PC_VMAX: float = PC_VMAX_FALLBACK
-# Cached per timestamp (for playback). Editor recomputes live from edited positions.
-_PC_CACHE: Dict[int, np.ndarray] = {}
+# -------- Defensive analytics (./analytics) --------
+# Frame rate of the tracking [Hz]. None = infer it from the stored velocities.
+TRACKING_FPS: Optional[float] = None
+# Dropdown value for "the puck carrier is not known": results are averaged over the attackers.
+CARRIER_AUTO = "auto"
 
-# -------- Coverage Control (beta) styling/params --------
-COV_STANDOFF = 3.0
-COV_VEL_GAIN = 0.8
-COV_EMA_ALPHA = 0.35
-COV_MAX_STEP = 1.0
-COV_GHOST_SIZE = 16
-COV_GHOST_COLOR = "rgba(46,134,222,0.42)"
-COV_CONNECTOR_COLOR = "rgba(46,134,222,0.7)"
-COV_CONNECTOR_WIDTH = 2
-_COV_CACHE: Dict[int, pd.DataFrame] = {}
+# Pitch control heatmap
+PC_OPACITY = 0.50
+
+# Scoring-threat heatmap, in % chance of a goal from the next puck event per 100 m² of ice.
+# The scale is fixed so that colours can be compared between frames and clips.
+THREAT_ZMAX = 2.0
+THREAT_OPACITY = 0.90
+THREAT_COLORSCALE = [
+    [0.00, "rgba(255,255,255,0)"],
+    [0.05, "rgba(250,215,160,0.55)"],
+    [0.25, "rgba(245,176,65,0.85)"],
+    [0.60, "rgba(211,84,0,0.90)"],
+    [1.00, "rgba(120,40,31,0.95)"],
+]
+
+# Reference defense (pitch-control coverage): ghosts on the rink, line in the timeline
+REF_COLOR = "#1e8449"
+REF_GHOST_SIZE = 16
+REF_GHOST_FILL = "rgba(30,132,73,0.45)"
+REF_CONNECTOR_COLOR = "rgba(30,132,73,0.75)"
+REF_CONNECTOR_WIDTH = 2
+TRACKED_COLOR = "#2e86de"   # tracked defense in the timeline (same blue as the defenders)
 
 STYLES: Dict[str, Any] = {
     "page": {"background": "#f6f7fb", "fontFamily": "Inter, Segoe UI, Arial, sans-serif"},
@@ -304,177 +316,144 @@ def _velocity_quiver_traces(df_frame: pd.DataFrame) -> List[go.Scatter]:
 
 
 # --------------------------------------------------------------------------------------
-# Pitch Control (beta): fast symmetric model
+# Defensive analytics: pitch control, scoring threat, reference defense
 # --------------------------------------------------------------------------------------
 
-def _auto_calibrate_vmax(df_all: pd.DataFrame) -> float:
-    try:
-        sp = np.sqrt(np.square(df_all["vx"].to_numpy()) + np.square(df_all["vy"].to_numpy()))
-        vmax = float(np.nanpercentile(sp, 95))
-        if not np.isfinite(vmax) or vmax <= 0:
-            return PC_VMAX_FALLBACK
-        return max(PC_VMAX_FALLBACK * 0.5, min(PC_VMAX_FALLBACK * 4.0, vmax))
-    except Exception:
-        return PC_VMAX_FALLBACK
+ANALYTICS: Optional[SceneAnalytics] = None
+# Last editor frame that was analysed (the figure and the tiles ask for the same one).
+_EDIT_MEMO: Dict[str, Any] = {}
 
 
-def _pitch_control_probs(
-    df_frame: pd.DataFrame,
-    bounds: Dict[str, float],
-    grid_w: int = PC_GRID_W,
-    grid_h: int = PC_GRID_H,
-    vmax: float = PC_VMAX
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if df_frame is None or len(df_frame) < 2:
-        gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
-        gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
-        return gx, gy, np.zeros((grid_h, grid_w), dtype=float)
-
-    gx = np.linspace(bounds["x_min"], bounds["x_max"], grid_w)
-    gy = np.linspace(bounds["y_min"], bounds["y_max"], grid_h)
-    Gx, Gy = np.meshgrid(gx, gy)
-    pts = np.stack([Gx.ravel(), Gy.ravel()], axis=1)
-
-    xs = df_frame["x"].to_numpy(dtype=float)
-    ys = df_frame["y"].to_numpy(dtype=float)
-    vxs = df_frame["vx"].to_numpy(dtype=float)
-    vys = df_frame["vy"].to_numpy(dtype=float)
-    teams = df_frame["team"].astype(str).to_numpy()
-    is_off = (teams == "Offense")
-    is_def = (teams == "Defense")
-
-    if is_off.sum() == 0 or is_def.sum() == 0:
-        Z = np.ones((grid_h, grid_w), dtype=float) if is_off.sum() > 0 else np.zeros((grid_h, grid_w), dtype=float)
-        return gx, gy, Z
-
-    speeds = np.sqrt(vxs * vxs + vys * vys)
-    dx = xs[:, None] - pts[None, :, 0]
-    dy = ys[:, None] - pts[None, :, 1]
-    d = np.sqrt(dx * dx + dy * dy) + 1e-9
-
-    t = PC_TAU_REACT + np.maximum(0.0, d - speeds[:, None] * PC_TAU_ACCEL) / max(vmax, 1e-3)
-    r = np.exp(-PC_LAMBDA * t)
-    R_off = r[is_off].sum(axis=0)
-    R_def = r[is_def].sum(axis=0)
-
-    Z_off = (R_off / (R_off + R_def + 1e-12)).reshape((grid_h, grid_w))
-    return gx, gy, Z_off
+def _new_analytics(df_all: pd.DataFrame) -> SceneAnalytics:
+    """Engine for a clip; the replay of the reference defense starts in the background."""
+    engine = SceneAnalytics(df_all, RINK_BOUNDS, EngineConfig(fps=TRACKING_FPS))
+    engine.ensure_timeline(None)
+    return engine
 
 
-def _pc_cached_for_timestamp(ts: int, df_all: pd.DataFrame, bounds: Dict[str, float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if ts in _PC_CACHE:
-        Z = _PC_CACHE[ts]
-        gx = np.linspace(bounds["x_min"], bounds["x_max"], PC_GRID_W)
-        gy = np.linspace(bounds["y_min"], bounds["y_max"], PC_GRID_H)
-        return gx, gy, Z
-
-    df_frame = df_all[df_all["timestamp"] == ts]
-    gx, gy, Z = _pitch_control_probs(df_frame, bounds, PC_GRID_W, PC_GRID_H, PC_VMAX)
-    _PC_CACHE[ts] = Z
-    return gx, gy, Z
+def _carrier_arg(value: Any) -> Optional[str]:
+    return None if value in (None, "", CARRIER_AUTO) else str(value)
 
 
-# --------------------------------------------------------------------------------------
-# Coverage Control (beta)
-# --------------------------------------------------------------------------------------
-
-def _goal_point(bounds: Dict[str, float]) -> Tuple[float, float]:
-    gx = bounds["x_min"]
-    gy = (bounds["y_min"] + bounds["y_max"]) / 2.0
-    return gx, gy
+def _carrier_options() -> List[Dict[str, str]]:
+    opts = [{"label": "Unknown (average over attackers)", "value": CARRIER_AUTO}]
+    opts += [{"label": f"Attacker {pid}", "value": pid} for pid in ANALYTICS.carrier_choices()]
+    return opts
 
 
-def _instant_coverage_for_frame(df_frame: pd.DataFrame, bounds: Dict[str, float]) -> pd.DataFrame:
-    if df_frame is None or df_frame.empty:
-        return pd.DataFrame(columns=["player_id", "team", "sug_x", "sug_y"])
+def _editor_analysis(df_frame_full: pd.DataFrame, carrier: Optional[str]) -> Dict[str, Any]:
+    """Threat and suggested positions of an editor frame, memoised on the positions."""
+    key = (
+        id(ANALYTICS), carrier,
+        tuple(df_frame_full["team"].astype(str) + "|" + df_frame_full["player_id"].astype(str)),
+        tuple(np.round(df_frame_full[["x", "y"]].to_numpy(float), 3).ravel()),
+    )
+    memo = _EDIT_MEMO
+    if memo.get("key") != key:
+        state = ANALYTICS.state_from_frame(df_frame_full)
+        memo = {
+            "key": key,
+            "state": state,
+            "result": ANALYTICS.evaluate(state, carrier),
+            "suggestion": ANALYTICS.suggest(state, carrier),
+        }
+        _EDIT_MEMO.clear()
+        _EDIT_MEMO.update(memo)
+    return memo
 
-    gx, gy = _goal_point(bounds)
-    defs = df_frame[df_frame["team"] == "Defense"].copy()
-    offs = df_frame[df_frame["team"] == "Offense"].copy()
 
-    if defs.empty:
-        return pd.DataFrame(columns=["player_id", "team", "sug_x", "sug_y"])
+def _pct(value: float, digits: int = 2) -> str:
+    return "–" if value is None or not np.isfinite(value) else f"{100.0 * value:.{digits}f}%"
 
-    if offs.empty:
-        vecx = gx - defs["x"].to_numpy(float)
-        vecy = gy - defs["y"].to_numpy(float)
-        d = np.sqrt(vecx * vecx + vecy * vecy) + 1e-9
-        nudx = vecx / d * 0.5
-        nudy = vecy / d * 0.5
-        return pd.DataFrame(
-            {"player_id": defs["player_id"].astype(str).values, "team": "Defense",
-             "sug_x": defs["x"].to_numpy(float) + nudx, "sug_y": defs["y"].to_numpy(float) + nudy}
-        )
 
-    D = defs[["x", "y"]].to_numpy(float)
-    O = offs[["x", "y"]].to_numpy(float)
-    OV = (offs[["vx", "vy"]].to_numpy(float)
-          if {"vx", "vy"}.issubset(offs.columns) else np.zeros_like(O))
+def _delta(new: float, base: float) -> str:
+    """Relative change of ``new`` with respect to ``base`` as signed text."""
+    if not (np.isfinite(new) and np.isfinite(base)) or base <= 0:
+        return "–"
+    change = 100.0 * (new / base - 1.0)
+    sign = "−" if change < 0 else "+"
+    return f"{sign}{abs(change):.0f}%"
 
-    # Nearest-offender assignment (fast; not one-to-one optimal)
-    def_to_off = []
-    for di in range(D.shape[0]):
-        d = D[di]
-        j = int(np.argmin(np.sqrt(((O - d) ** 2).sum(axis=1))))
-        def_to_off.append(j)
 
-    sug_x = np.zeros(D.shape[0], dtype=float)
-    sug_y = np.zeros(D.shape[0], dtype=float)
-    g = np.array([gx, gy], dtype=float)
+def _timeline_figure(carrier: Optional[str]) -> Dict[str, Any]:
+    """Threat over the clip against the tracked and the reference defense."""
+    tl = ANALYTICS.timeline(carrier)
+    fig = go.Figure()
+    axis = dict(showgrid=True, gridcolor="#eef1f5", zeroline=False, linecolor="#d1d5db",
+                tickfont=dict(color="#6b7280", size=11), title_font=dict(color="#6b7280", size=12))
+    annotations = []
+    if len(tl["frame_idx"]) == 0:
+        annotations.append(dict(text="The threat timeline needs attackers and defenders in the clip.",
+                                showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5,
+                                font=dict(size=13, color="#6b7280")))
+    else:
+        x = tl["frame_idx"] / ANALYTICS.fps          # seconds from the start of the clip
+        series = [("Tracked defense", tl["obso_tracked"], TRACKED_COLOR),
+                  ("Reference defense", tl["obso_reference"], REF_COLOR)]
+        for name, y, color in series:
+            fig.add_trace(go.Scatter(
+                x=x, y=100.0 * y, name=name, mode="lines",
+                line=dict(color=color, width=2),
+                hovertemplate="%{y:.2f}%<extra>" + name + "</extra>",
+            ))
+        # Direct labels at the right end, pushed apart so they never overlap.
+        ends = [100.0 * float(y[-1]) for _, y, _ in series]
+        for k, (name, _, color) in enumerate(series):
+            above = ends[k] >= ends[1 - k]
+            annotations.append(dict(
+                x=float(x[-1]), y=ends[k], xref="x", yref="y", text=name.split()[0],
+                showarrow=False, xanchor="left", xshift=6, yshift=8 if above else -8,
+                font=dict(size=11, color="#374151"),
+            ))
+    fig.update_layout(
+        autosize=True,
+        margin=dict(l=56, r=76, t=34, b=44),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="#ffffff", font=dict(color="#111827", size=12)),
+        legend=dict(orientation="h", x=0, y=1.14, xanchor="left", yanchor="top",
+                    font=dict(color="#374151", size=12)),
+        xaxis=dict(title="Time in the clip", ticksuffix=" s", hoverformat=".1f", **axis),
+        yaxis=dict(title="Scoring threat (%)", rangemode="tozero", ticksuffix="%", **axis),
+        annotations=annotations,
+        # The first shape is the cursor of the current frame; it is moved in the browser.
+        shapes=[dict(type="line", xref="x", yref="paper", x0=0, x1=0, y0=0, y1=1,
+                     line=dict(color="#111827", width=1.5, dash="dot"))],
+        uirevision="timeline",
+        meta=dict(fps=ANALYTICS.fps),
+    )
+    return fig.to_plotly_json()
 
-    for di in range(D.shape[0]):
-        j = def_to_off[di]
-        target = O[j] + COV_VEL_GAIN * OV[j]
-        g2t = target - g
-        n = np.linalg.norm(g2t) + 1e-9
-        dir_g2t = g2t / n
-        sug = target - dir_g2t * COV_STANDOFF
-        sug[0] = np.clip(sug[0], bounds["x_min"], bounds["x_max"])
-        sug[1] = np.clip(sug[1], bounds["y_min"], bounds["y_max"])
-        sug_x[di], sug_y[di] = float(sug[0]), float(sug[1])
 
-    return pd.DataFrame(
-        {"player_id": defs["player_id"].astype(str).values, "team": "Defense",
-         "sug_x": sug_x, "sug_y": sug_y}
+def _tile(label: str, value: str, note: str, accent: str, wide: bool = False) -> html.Div:
+    return html.Div(
+        [
+            html.Div(label, className="sb-tile__label"),
+            html.Div(value, className="sb-tile__value"),
+            html.Div(note, className="sb-tile__note"),
+        ],
+        className="sb-tile sb-tile--wide" if wide else "sb-tile", style={"--tile-accent": accent},
     )
 
 
-def _precompute_coverage_cache(df_all: pd.DataFrame, timestamps: List[int], bounds: Dict[str, float]) -> Dict[int, pd.DataFrame]:
-    cache: Dict[int, pd.DataFrame] = {}
-    prev: Dict[str, Tuple[float, float]] = {}
-
-    for ts in timestamps:
-        frame = df_all[df_all["timestamp"] == ts]
-        inst = _instant_coverage_for_frame(frame, bounds)
-        if inst.empty:
-            cache[ts] = inst
-            continue
-
-        sx = inst["sug_x"].to_numpy(float)
-        sy = inst["sug_y"].to_numpy(float)
-        pids = inst["player_id"].astype(str).tolist()
-
-        for i, pid in enumerate(pids):
-            cur = np.array([sx[i], sy[i]], dtype=float)
-            if pid in prev:
-                pr = np.array(prev[pid], dtype=float)
-                blended = pr + COV_EMA_ALPHA * (cur - pr)
-                step = blended - pr
-                sl = float(np.linalg.norm(step))
-                if sl > COV_MAX_STEP:
-                    step *= (COV_MAX_STEP / (sl + 1e-9))
-                    blended = pr + step
-                sx[i], sy[i] = float(blended[0]), float(blended[1])
-                prev[pid] = (sx[i], sy[i])
-            else:
-                prev[pid] = (float(cur[0]), float(cur[1]))
-
-        smoothed = inst.copy()
-        smoothed["sug_x"] = sx
-        smoothed["sug_y"] = sy
-        cache[ts] = smoothed
-
-    return cache
+def _receiver_bars(result: Dict[str, Any]) -> List[Any]:
+    """Share of the threat carried by each attacker, largest first."""
+    ids, vals = result.get("att_ids", []), np.asarray(result.get("per_attacker", []), dtype=float)
+    if len(ids) == 0:
+        return []
+    top = float(vals.max()) if vals.max() > 0 else 1.0
+    rows = [html.Div("Threat by attacker", className="sb-bars__title")]
+    for k in np.argsort(-vals):
+        rows.append(html.Div(
+            [
+                html.Div(f"#{ids[k]}", className="sb-bars__id"),
+                html.Div(html.Div(className="sb-bars__fill", style={"width": f"{100.0 * vals[k] / top:.1f}%"}),
+                         className="sb-bars__track"),
+                html.Div(_pct(vals[k]), className="sb-bars__value"),
+            ],
+            className="sb-bars__row",
+        ))
+    return rows
 
 
 # --------------------------------------------------------------------------------------
@@ -483,7 +462,6 @@ def _precompute_coverage_cache(df_all: pd.DataFrame, timestamps: List[int], boun
 
 def build_tracking_figure(
     df_frame_for_display: pd.DataFrame,
-    df_frame_for_pc_full: pd.DataFrame,
     trails_df: Optional[pd.DataFrame],
     bounds: Dict[str, float],
     team_filter: str,
@@ -491,10 +469,9 @@ def build_tracking_figure(
     show_voronoi: bool,
     show_trails: bool,
     show_velocity: bool,
-    show_pc: bool,
-    show_coverage: bool,
-    coverage_df: Optional[pd.DataFrame],
-    current_ts: int,
+    pc_field: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    threat_field: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    reference_df: Optional[pd.DataFrame],
     mode: str,
     edits_enabled: bool,
 ) -> Tuple[go.Figure, List[str]]:
@@ -502,18 +479,17 @@ def build_tracking_figure(
     shape_index_map: List[str] = []
 
     df_frame = _clamp_df(df_frame_for_display, bounds)
-    df_pc_full = _clamp_df(df_frame_for_pc_full, bounds)
     trails_df = _clamp_df(trails_df, bounds)
 
-    # team filter (affects players/trails/voronoi/coverage; PC uses df_pc_full with both teams)
+    # team filter (affects players/trails/voronoi/reference; the heatmaps always use both teams)
     if team_filter != "both":
         keep = "Offense" if team_filter == "offense" else "Defense"
         df_frame = df_frame[df_frame["team"] == keep]
         if trails_df is not None:
             trails_df = trails_df[trails_df["team"] == keep]
-        if coverage_df is not None:
+        if reference_df is not None:
             shown_def_pids = set(df_frame[df_frame["team"] == "Defense"]["player_id"].astype(str).tolist())
-            coverage_df = coverage_df[coverage_df["player_id"].astype(str).isin(shown_def_pids)]
+            reference_df = reference_df[reference_df["player_id"].astype(str).isin(shown_def_pids)]
 
     # trails
     if show_trails and trails_df is not None and not trails_df.empty:
@@ -527,20 +503,30 @@ def build_tracking_figure(
             )
 
     # pitch control heatmap (below everything)
-    if show_pc:
-        if mode == "editor":
-            gx, gy, Z = _pitch_control_probs(df_pc_full, bounds, PC_GRID_W, PC_GRID_H, PC_VMAX)
-        else:
-            gx, gy, Z = _pc_cached_for_timestamp(current_ts, df, bounds)
-
+    if pc_field is not None:
+        gx, gy, Z = pc_field
         data.append(
             go.Heatmap(
                 x=gx, y=gy, z=Z,
                 colorscale=PC_COLORSCALE,
-                zmin=0.0, zmax=1.0,
+                zmin=0.0, zmax=1.0, zsmooth="best",
                 showscale=False,
                 hovertemplate="Offense control: %{z:.2f}<extra></extra>",
                 opacity=PC_OPACITY,
+            )
+        )
+
+    # scoring-threat heatmap: where the attack's chance of a goal comes from
+    if threat_field is not None:
+        gx, gy, Z = threat_field
+        data.append(
+            go.Heatmap(
+                x=gx, y=gy, z=1.0e4 * Z,
+                colorscale=THREAT_COLORSCALE,
+                zmin=0.0, zmax=THREAT_ZMAX, zsmooth="best",
+                showscale=False,
+                hovertemplate="Scoring threat: %{z:.2f}% per 100 m²<extra></extra>",
+                opacity=THREAT_OPACITY,
             )
         )
 
@@ -567,31 +553,32 @@ def build_tracking_figure(
     if show_velocity and not df_frame.empty:
         data.extend(_velocity_quiver_traces(df_frame))
 
-    # coverage control (connectors + ghost defenders)
-    if show_coverage and coverage_df is not None and not coverage_df.empty:
+    # reference defense (connectors + ghost defenders)
+    if reference_df is not None and not reference_df.empty:
         cur_defs = df_frame[df_frame["team"] == "Defense"][["player_id", "x", "y"]].copy()
         cur_defs["player_id"] = cur_defs["player_id"].astype(str)
-        cov = coverage_df.merge(cur_defs, on="player_id", how="inner", suffixes=("_sug", "_act"))
-        if not cov.empty:
+        ref = reference_df.merge(cur_defs, on="player_id", how="inner")
+        if not ref.empty:
             xs, ys = [], []
-            for _, r in cov.iterrows():
+            for _, r in ref.iterrows():
                 xs += [float(r["x"]), float(r["sug_x"]), None]
                 ys += [float(r["y"]), float(r["sug_y"]), None]
             data.append(
                 go.Scatter(
                     x=xs, y=ys, mode="lines",
-                    line=dict(width=COV_CONNECTOR_WIDTH, color=COV_CONNECTOR_COLOR, dash="dot"),
+                    line=dict(width=REF_CONNECTOR_WIDTH, color=REF_CONNECTOR_COLOR, dash="dot"),
                     opacity=0.9, hoverinfo="skip", showlegend=False
                 )
             )
             data.append(
                 go.Scatter(
-                    x=cov["sug_x"], y=cov["sug_y"],
+                    x=ref["sug_x"], y=ref["sug_y"],
                     mode="markers+text",
-                    marker=dict(size=COV_GHOST_SIZE, color=COV_GHOST_COLOR, line=dict(width=1, color="white")),
-                    text=[f"{pid}′" for pid in cov["player_id"]],
+                    marker=dict(size=REF_GHOST_SIZE, color=REF_GHOST_FILL, line=dict(width=1.5, color=REF_COLOR)),
+                    text=[f"{pid}′" for pid in ref["player_id"]],
                     textposition="middle center",
-                    hoverinfo="skip", showlegend=False,
+                    textfont=dict(color="#0b3d20", size=11),
+                    hovertemplate="Reference defender %{text}<extra></extra>", showlegend=False,
                 )
             )
 
@@ -823,8 +810,8 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
                                             {"label": "Show Voronoi", "value": "voronoi"},
                                             {"label": "Show Velocity", "value": "velocity"},
                                             {"label": "Pitch Control", "value": "pc"},
-                                            {"label": "Coverage Control (beta)", "value": "coverage"},
-                                            {"label": "EPV / xT (soon)", "value": "epvxt", "disabled": True},
+                                            {"label": "Scoring Threat", "value": "threat"},
+                                            {"label": "Reference Defense", "value": "reference"},
                                         ],
                                         value=["players", "voronoi"],
                                         inline=True,
@@ -845,6 +832,68 @@ def build_bottom_panel(timestamps: List[int]) -> html.Div:
     )
 
 
+def build_analytics_panel() -> html.Div:
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.H3("Defensive analytics", className="sb-analytics__title"),
+                            html.Div(
+                                "Scoring threat is the chance that the next puck event ends in a goal. "
+                                "The reference defense starts where the tracked defenders start and "
+                                "then follows pitch-control coverage against the tracked attack.",
+                                className="sb-analytics__lede",
+                            ),
+                        ],
+                        className="sb-analytics__head",
+                    ),
+                    html.Div(
+                        [
+                            html.Div("Puck carrier", className="sb-analytics__field"),
+                            dcc.Dropdown(
+                                id="carrier-select",
+                                options=_carrier_options(),
+                                value=CARRIER_AUTO,
+                                clearable=False,
+                                className="sb-carrier",
+                            ),
+                        ],
+                        className="sb-analytics__carrier",
+                    ),
+                ],
+                className="sb-analytics__top",
+            ),
+            html.Div(
+                [
+                    html.Div(
+                        dcc.Graph(
+                            id="threat-timeline", className="sb-timeline-graph",
+                            style={"height": "310px"},
+                            config={"responsive": True, "displayModeBar": False},
+                        ),
+                        className="sb-analytics__chart",
+                    ),
+                    html.Div(
+                        [
+                            html.Div(id="threat-tiles", className="sb-tiles"),
+                            html.Div(id="threat-receivers", className="sb-bars"),
+                        ],
+                        className="sb-analytics__side",
+                    ),
+                ],
+                className="sb-analytics__grid",
+            ),
+            html.Div(id="analytics-note", className="sb-analytics__note"),
+            # Figure of the timeline once the replay is ready, and the poll that waits for it
+            dcc.Store(id="timeline-figure"),
+            dcc.Interval(id="timeline-poll", interval=700, disabled=True),
+        ],
+        className="sb-panel sb-analytics",
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Build data & app at import time (Render needs server at module scope)
 # --------------------------------------------------------------------------------------
@@ -859,11 +908,8 @@ timestamps = sorted(df["timestamp"].unique())
 if not timestamps:
     raise RuntimeError("No timestamps found in tracking data.")
 
-# Calibrate v_max from data (95th percentile of speed)
-PC_VMAX = _auto_calibrate_vmax(df)
-
-# Precompute coverage suggestions for smooth playback
-_COV_CACHE = _precompute_coverage_cache(df, timestamps, RINK_BOUNDS)
+# Pitch control, scoring threat and the reference defense of the clip
+ANALYTICS = _new_analytics(df)
 
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 server = app.server
@@ -872,7 +918,10 @@ app.title = "Sunbears Dashboard"
 app.layout = html.Div(
     [
         build_header(),
-        html.Div([build_top_row(RINK_BOUNDS), build_bottom_panel(timestamps)], className="sb-container"),
+        html.Div(
+            [build_top_row(RINK_BOUNDS), build_bottom_panel(timestamps), build_analytics_panel()],
+            className="sb-container",
+        ),
         
         # Modal placeholder
         html.Div(id="import-modal-container"),
@@ -1049,11 +1098,15 @@ def adjust_slider_bounds(ts_list):
     Input("team-filter", "value"),
     Input("mode-selector", "value"),
     Input("edits-store", "data"),
+    Input("carrier-select", "value"),
+    Input("timeline-figure", "data"),   # redraw when the replay of the reference defense is ready
     State("timestamps", "data"),
 )
-def update_figure(time_index: int, overlay_values, team_filter, mode, edits_store, ts_list):
+def update_figure(time_index: int, overlay_values, team_filter, mode, edits_store, carrier_value,
+                  _timeline_ready, ts_list):
     current_timestamp = ts_list[time_index]
     ts_key = str(current_timestamp)
+    overlays = overlay_values or []
 
     # Current frame data (full, both teams)
     df_frame_full = df[df["timestamp"] == current_timestamp].copy()
@@ -1063,38 +1116,50 @@ def update_figure(time_index: int, overlay_values, team_filter, mode, edits_stor
     df_frame_for_display = df_frame_full.copy()
 
     # Flags
-    show_trails = "trails" in (overlay_values or [])
-    show_velocity = "velocity" in (overlay_values or [])
-    show_pc = "pc" in (overlay_values or [])
-    show_coverage = "coverage" in (overlay_values or [])
+    show_trails = "trails" in overlays
+    show_velocity = "velocity" in overlays
+    show_pc = "pc" in overlays
+    show_threat = "threat" in overlays
+    show_reference = "reference" in overlays
 
     # Trails
     trails_df = make_trails(df, current_timestamp, TRAIL_DEFAULT) if show_trails else None
     if trails_df is not None and mode == "editor":
         trails_df = _apply_edits_to_trails(trails_df, edits_store or {})
 
-    # Coverage control source
-    coverage_df = None
-    if show_coverage:
-        if mode == "editor" and edits_for_ts:
-            coverage_df = _instant_coverage_for_frame(df_frame_full, RINK_BOUNDS)
+    # Defensive analytics. Playback reads the tracked frame and the replayed reference
+    # defense; the editor analyses the frame as it is drawn and suggests positions for it.
+    pc_field = threat_field = reference_df = None
+    carrier = _carrier_arg(carrier_value)
+    if (show_pc or show_threat or show_reference) and ANALYTICS.has_frame(current_timestamp):
+        if mode == "editor":
+            info = _editor_analysis(df_frame_full, carrier)
+            if show_pc:
+                pc_field = ANALYTICS.pitch_control(info["state"], carrier)
+            if show_threat:
+                threat_field = ANALYTICS.threat_surface(info["result"])
+            if show_reference:
+                reference_df = info["suggestion"]["positions"]
         else:
-            coverage_df = _COV_CACHE.get(current_timestamp, None)
+            if show_pc:
+                pc_field = ANALYTICS.pitch_control_at(current_timestamp, carrier)
+            if show_threat:
+                threat_field = ANALYTICS.threat_surface(ANALYTICS.evaluate_at(current_timestamp, carrier))
+            if show_reference and ANALYTICS.timeline_ready(carrier):
+                reference_df = ANALYTICS.reference_at(current_timestamp, carrier)
 
     fig, shape_map = build_tracking_figure(
         df_frame_for_display=df_frame_for_display,
-        df_frame_for_pc_full=df_frame_full,
         trails_df=trails_df,
         bounds=RINK_BOUNDS,
         team_filter=team_filter,
-        show_players=("players" in (overlay_values or [])),
-        show_voronoi=("voronoi" in (overlay_values or [])),
+        show_players=("players" in overlays),
+        show_voronoi=("voronoi" in overlays),
         show_trails=show_trails,
         show_velocity=show_velocity,
-        show_pc=show_pc,
-        show_coverage=show_coverage,
-        coverage_df=coverage_df,
-        current_ts=current_timestamp,
+        pc_field=pc_field,
+        threat_field=threat_field,
+        reference_df=reference_df,
         mode=mode,
         edits_enabled=True,
     )
@@ -1185,6 +1250,134 @@ def edits_manager(relayout, time_idx, mode, overlays, shape_map, ts_list, edits_
     return edits_store
 
 
+# ---------------------- Defensive analytics panel ----------------------
+
+@app.callback(
+    Output("carrier-select", "options"),
+    Output("carrier-select", "value"),
+    Output("analytics-note", "children"),
+    Input("timestamps", "data"),
+)
+def refresh_analytics_meta(_ts_list):
+    """A new clip has its own attackers, frame rate and attack direction."""
+    note = (
+        f"Read from the clip: {ANALYTICS.describe()}. "
+        "The tracked attack does not react to the reference defense, so read the gap as "
+        "how much threat was defendable, not as what would have happened."
+    )
+    return _carrier_options(), CARRIER_AUTO, note
+
+
+@app.callback(
+    Output("timeline-figure", "data"),
+    Output("timeline-poll", "disabled"),
+    Input("carrier-select", "value"),
+    Input("timestamps", "data"),
+    Input("timeline-poll", "n_intervals"),
+    State("timeline-figure", "data"),
+)
+def update_timeline(carrier_value, _ts_list, _tick, current):
+    """The replay runs in the background; poll until it is ready, then draw it."""
+    carrier = _carrier_arg(carrier_value)
+    if ANALYTICS.ensure_timeline(carrier):
+        return _timeline_figure(carrier), True
+    return (dash.no_update if current is None else None), False
+
+
+# Move the cursor of the timeline in the browser: no server round trip per frame.
+app.clientside_callback(
+    """
+    function(fig, idx) {
+        if (!fig) {
+            return {data: [], layout: {
+                xaxis: {visible: false}, yaxis: {visible: false},
+                margin: {l: 10, r: 10, t: 10, b: 10},
+                annotations: [{text: "Replaying the clip with the reference defense…",
+                               showarrow: false, xref: "paper", yref: "paper", x: 0.5, y: 0.5,
+                               font: {size: 13, color: "#6b7280"}}]}};
+        }
+        const layout = Object.assign({}, fig.layout);
+        if (layout.shapes && layout.shapes.length) {
+            const t = idx / ((layout.meta && layout.meta.fps) || 1);
+            const cursor = Object.assign({}, layout.shapes[0], {x0: t, x1: t});
+            layout.shapes = [cursor].concat(layout.shapes.slice(1));
+        }
+        return Object.assign({}, fig, {layout: layout});
+    }
+    """,
+    Output("threat-timeline", "figure"),
+    Input("timeline-figure", "data"),
+    Input("time-slider-main", "value"),
+)
+
+
+@app.callback(
+    Output("time-slider-main", "value", allow_duplicate=True),
+    Input("threat-timeline", "clickData"),
+    State("timestamps", "data"),
+    prevent_initial_call=True,
+)
+def seek_from_timeline(click, ts_list):
+    """Clicking the timeline jumps to that moment of the clip."""
+    try:
+        idx = int(round(float(click["points"][0]["x"]) * ANALYTICS.fps))
+    except (TypeError, KeyError, IndexError, ValueError):
+        raise dash.exceptions.PreventUpdate
+    return max(0, min(len(ts_list) - 1, idx))
+
+
+@app.callback(
+    Output("threat-tiles", "children"),
+    Output("threat-receivers", "children"),
+    Input("time-slider-main", "value"),
+    Input("carrier-select", "value"),
+    Input("mode-selector", "value"),
+    Input("edits-store", "data"),
+    Input("timeline-figure", "data"),
+    State("timestamps", "data"),
+)
+def update_threat_tiles(time_index, carrier_value, mode, edits_store, _timeline_ready, ts_list):
+    if time_index is None or time_index >= len(ts_list):
+        raise dash.exceptions.PreventUpdate
+    ts = ts_list[time_index]
+    if not ANALYTICS.has_frame(ts):
+        raise dash.exceptions.PreventUpdate
+    carrier = _carrier_arg(carrier_value)
+
+    if mode == "editor":
+        frame = df[df["timestamp"] == ts].copy()
+        frame = _apply_edits_to_frame(frame, (edits_store or {}).get(str(ts), {}))
+        info = _editor_analysis(frame, carrier)
+        result = info["result"]
+        now, other = result["obso"], info["suggestion"]["obso"]
+        first = _tile("Scoring threat, this frame", _pct(now),
+                      "Against the defenders as placed. Drag a player to see it change.", TRACKED_COLOR)
+        second = _tile("With suggested positions", _pct(other),
+                       f"{_delta(other, now)} with the defenders on the green markers", REF_COLOR)
+    else:
+        result = ANALYTICS.evaluate_at(ts, carrier)
+        now = result["obso"]
+        ready = ANALYTICS.timeline_ready(carrier)
+        other = ANALYTICS.reference_threat_at(ts, carrier) if ready else float("nan")
+        first = _tile("Scoring threat now", _pct(now), "Against the tracked defense", TRACKED_COLOR)
+        second = _tile("Reference defense now", _pct(other),
+                       f"{_delta(other, now)} vs tracked" if ready else "Replaying the clip…", REF_COLOR)
+
+    if ANALYTICS.timeline_ready(carrier):
+        tl = ANALYTICS.timeline(carrier)
+        mt, mr = tl["mean_tracked"], tl["mean_reference"]
+        if np.isfinite(mt) and np.isfinite(mr) and mt > 0:
+            verb = "less" if mr <= mt else "more"
+            note = f"Reference concedes {abs(100.0 * (mr / mt - 1.0)):.0f}% {verb} over the clip"
+        else:
+            note = "Needs attackers and defenders in the clip"
+        third = _tile("Clip average, tracked → reference", f"{_pct(mt)} → {_pct(mr)}", note, "#6b7280", wide=True)
+    else:
+        third = _tile("Clip average, tracked → reference", "–", "Replaying the clip…", "#6b7280", wide=True)
+
+    return [first, second, third], _receiver_bars(result)
+
+
 # ---------------------- Import Modal & Dataset Switching ----------------------
 
 # One callback handles open/cancel via pattern matching (no missing-ID errors)
@@ -1245,11 +1438,10 @@ def process_import(confirm_click, folder, scene_name):
         return dash.no_update, dash.no_update, dash.no_update, "No timestamps found in the CSV.", dash.no_update
 
     # Update global variables & caches
-    global df, _PC_CACHE, _COV_CACHE, PC_VMAX
+    global df, ANALYTICS
     df = new_df
-    _PC_CACHE = {}
-    PC_VMAX = _auto_calibrate_vmax(df)
-    _COV_CACHE = _precompute_coverage_cache(df, new_timestamps, RINK_BOUNDS)
+    ANALYTICS = _new_analytics(df)
+    _EDIT_MEMO.clear()
 
     return (
         {"csv": str(csv_path), "video": f"assets/{video_path.as_posix()}".replace("assets/assets/", "assets/")},
